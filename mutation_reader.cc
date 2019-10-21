@@ -166,6 +166,10 @@ public:
     };
 
     using mutation_fragment_batch = boost::iterator_range<merger_vector<mutation_fragment>::iterator>;
+
+    // Determines how many times a fragment should be taken from the same
+    // reader in order to enter gallop mode. Must be greater than one.
+    static constexpr int gallop_mode_entering_threshold = 3;
 private:
     struct reader_heap_compare;
     struct fragment_heap_compare;
@@ -194,12 +198,25 @@ private:
     // end, a call to next_partition() or a call to
     // fast_forward_to(dht::partition_range).
     reader_and_last_fragment_kind _single_reader;
+    // Holds a reference to the reader that previously contributed a fragment.
+    // When hits reader contributes a certain number of fragments in a row,
+    // gallop mode becomes enabled. In this mode, the _galloping_reader
+    // is assumed to be the contributor of the next fragment.
+    reader_and_last_fragment_kind _galloping_reader;
+    // Counts how many times the _galloping_reader contributed a fragment
+    // before entering the gallop mode. It can also be equal to 0, meaning
+    // that the gallop mode was stopped (galloping reader lost to some other reader).
+    int _gallop_mode_hits = 0;
     const schema_ptr _schema;
     streamed_mutation::forwarding _fwd_sm;
     mutation_reader::forwarding _fwd_mr;
 private:
+    void maybe_add_readers_at_partition_boundary();
     void maybe_add_readers(const std::optional<dht::ring_position_view>& pos);
     void add_readers(std::vector<flat_mutation_reader> new_readers);
+    void retire_reader(reader_and_last_fragment_kind rk);
+    bool in_gallop_mode() const;
+    future<stop_iteration> advance_galloping_reader(db::timeout_clock::time_point timeout);
     future<> prepare_next(db::timeout_clock::time_point timeout);
     // Collect all forwardable readers into _next, and remove them from
     // their previous containers (_halted_readers and _fragment_heap).
@@ -303,6 +320,72 @@ struct mutation_reader_merger::fragment_heap_compare {
     }
 };
 
+void mutation_reader_merger::maybe_add_readers_at_partition_boundary() {
+    // We are either crossing partition boundary or ran out of
+    // readers. If there are halted readers then we are just
+    // waiting for a fast-forward so there is nothing to do.
+    if (_fragment_heap.empty() && _halted_readers.empty()) {
+        if (_reader_heap.empty()) {
+            maybe_add_readers(std::nullopt);
+        } else {
+            maybe_add_readers(_reader_heap.front().fragment.as_partition_start().key());
+        }
+    }
+}
+
+void mutation_reader_merger::retire_reader(reader_and_last_fragment_kind rk) {
+    if (_fwd_sm == streamed_mutation::forwarding::yes && rk.last_kind != mutation_fragment::kind::partition_end) {
+        // When in streamed_mutation::forwarding mode we need
+        // to keep track of readers that returned
+        // end-of-stream to know what readers to ff. We can't
+        // just ff all readers as we might drop fragments from
+        // partitions we haven't even read yet.
+        // Readers whoose last emitted fragment was a partition
+        // end are out of data for good for the current range.
+        _halted_readers.push_back(std::move(rk));
+    } else if (_fwd_mr == mutation_reader::forwarding::no) {
+        _to_remove.splice(_to_remove.end(), _all_readers, rk.reader);
+        if (_to_remove.size() >= 4) {
+            _to_remove.clear();
+        }
+    }
+}
+
+bool mutation_reader_merger::in_gallop_mode() const {
+    return _gallop_mode_hits >= gallop_mode_entering_threshold;
+}
+
+future<stop_iteration> mutation_reader_merger::advance_galloping_reader(db::timeout_clock::time_point timeout) {
+    // When _galloping_reader is present, we assume that it will keep producing fragments
+    // that win over other readers. If that assumption turns out to be no longer true,
+    // this function exits gallop mode and we should proceed with standard merging logic.
+    return (*_galloping_reader.reader)(timeout).then([this] (mutation_fragment_opt mfo) {
+        if (mfo) {
+            if (mfo->is_partition_start()) {
+                // Don't assume we will keep winning in the next partition.
+                _reader_heap.emplace_back(_galloping_reader.reader, std::move(*mfo));
+                boost::push_heap(_reader_heap, reader_heap_compare(*_schema));
+                maybe_add_readers_at_partition_boundary();
+            } else {
+                if (_fragment_heap.empty() || position_in_partition::less_compare(*_schema)(mfo->position(), _fragment_heap.front().fragment.position())) {
+                    _current.clear();
+                    _current.push_back(std::move(*mfo));
+                    _galloping_reader.last_kind = _current.back().mutation_fragment_kind();
+                    return stop_iteration::yes;
+                }
+
+                _fragment_heap.emplace_back(_galloping_reader.reader, std::move(*mfo));
+                boost::push_heap(_fragment_heap, fragment_heap_compare(*_schema));
+            }
+        } else {
+            retire_reader(_galloping_reader);
+            maybe_add_readers_at_partition_boundary();
+        }
+        _gallop_mode_hits = 0;
+        return stop_iteration::no;
+    });
+}
+
 future<> mutation_reader_merger::prepare_next(db::timeout_clock::time_point timeout) {
     return parallel_for_each(_next, [this, timeout] (reader_and_last_fragment_kind rk) {
         return (*rk.reader)(timeout).then([this, rk] (mutation_fragment_opt mfo) {
@@ -314,35 +397,13 @@ future<> mutation_reader_merger::prepare_next(db::timeout_clock::time_point time
                     _fragment_heap.emplace_back(rk.reader, std::move(*mfo));
                     boost::range::push_heap(_fragment_heap, fragment_heap_compare(*_schema));
                 }
-            } else if (_fwd_sm == streamed_mutation::forwarding::yes && rk.last_kind != mutation_fragment::kind::partition_end) {
-                // When in streamed_mutation::forwarding mode we need
-                // to keep track of readers that returned
-                // end-of-stream to know what readers to ff. We can't
-                // just ff all readers as we might drop fragments from
-                // partitions we haven't even read yet.
-                // Readers whoose last emitted fragment was a partition
-                // end are out of data for good for the current range.
-                _halted_readers.push_back(rk);
-            } else if (_fwd_mr == mutation_reader::forwarding::no) {
-                _to_remove.splice(_to_remove.end(), _all_readers, rk.reader);
-                if (_to_remove.size() >= 4) {
-                    _to_remove.clear();
-                }
+            } else {
+                retire_reader(rk);
             }
         });
     }).then([this] {
         _next.clear();
-
-        // We are either crossing partition boundary or ran out of
-        // readers. If there are halted readers then we are just
-        // waiting for a fast-forward so there is nothing to do.
-        if (_fragment_heap.empty() && _halted_readers.empty()) {
-            if (_reader_heap.empty()) {
-                maybe_add_readers(std::nullopt);
-            } else {
-                maybe_add_readers(_reader_heap.front().fragment.as_partition_start().key());
-            }
-        }
+        maybe_add_readers_at_partition_boundary();
     });
 }
 
@@ -352,6 +413,10 @@ void mutation_reader_merger::prepare_forwardable_readers() {
     std::move(_halted_readers.begin(), _halted_readers.end(), std::back_inserter(_next));
     if (_single_reader.reader != reader_iterator{}) {
         _next.emplace_back(std::exchange(_single_reader.reader, {}), _single_reader.last_kind);
+    }
+    if (in_gallop_mode()) {
+        _next.emplace_back(_galloping_reader);
+        _gallop_mode_hits = 0;
     }
     for (auto& df : _fragment_heap) {
         _next.emplace_back(df.reader, df.fragment.mutation_fragment_kind());
@@ -392,6 +457,17 @@ future<mutation_reader_merger::mutation_fragment_batch> mutation_reader_merger::
         return make_ready_future<mutation_fragment_batch>(_current);
     }
 
+    if (in_gallop_mode()) {
+        return advance_galloping_reader(timeout).then([this, timeout] (stop_iteration stop) {
+            if (stop == stop_iteration::yes) {
+                return make_ready_future<mutation_fragment_batch>(_current);
+            }
+            // Galloping reader may have lost to some other reader. In that case, we should proceed
+            // with standard merging logic.
+            return (*this)(timeout);
+        });
+    }
+
     if (!_next.empty()) {
         return prepare_next(timeout).then([this, timeout] { return (*this)(timeout); });
     }
@@ -421,6 +497,7 @@ future<mutation_reader_merger::mutation_fragment_batch> mutation_reader_merger::
             _single_reader = { _fragment_heap.back().reader, mutation_fragment::kind::partition_start };
             _current.emplace_back(std::move(_fragment_heap.back().fragment));
             _fragment_heap.clear();
+            _gallop_mode_hits = 0;
             return make_ready_future<mutation_fragment_batch>(_current);
         }
     }
@@ -436,6 +513,17 @@ future<mutation_reader_merger::mutation_fragment_batch> mutation_reader_merger::
     }
     while (!_fragment_heap.empty() && equal(_current.back().position(), _fragment_heap.front().fragment.position()));
 
+    if (_next.size() == 1 && _next.front().reader == _galloping_reader.reader) {
+        ++_gallop_mode_hits;
+        if (in_gallop_mode()) {
+            _galloping_reader.last_kind = _next.front().last_kind;
+            _next.clear();
+        }
+    } else {
+        _galloping_reader.reader = _next.front().reader;
+        _gallop_mode_hits = 1;
+    }
+
     return make_ready_future<mutation_fragment_batch>(_current);
 }
 
@@ -449,6 +537,7 @@ void mutation_reader_merger::next_partition() {
 
 future<> mutation_reader_merger::fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) {
     _single_reader = { };
+    _gallop_mode_hits = 0;
     _next.clear();
     _halted_readers.clear();
     _fragment_heap.clear();
