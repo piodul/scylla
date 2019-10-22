@@ -177,6 +177,12 @@ private:
     struct needs_merge_tag { };
     using needs_merge = bool_class<needs_merge_tag>;
 
+    // This must be an enum because a template parameter cannot be a class
+    enum class handle_galloping : bool {
+        yes = true,
+        no = false,
+    };
+
     std::unique_ptr<reader_selector> _selector;
     // We need a list because we need stable addresses across additions
     // and removals.
@@ -219,6 +225,7 @@ private:
     void add_readers(std::vector<flat_mutation_reader> new_readers);
     void retire_reader(reader_and_last_fragment_kind rk);
     bool in_gallop_mode() const;
+    template<handle_galloping handle_galloping> future<needs_merge> prepare_one(db::timeout_clock::time_point timeout, reader_and_last_fragment_kind rk);
     future<needs_merge> advance_galloping_reader(db::timeout_clock::time_point timeout);
     future<> prepare_next(db::timeout_clock::time_point timeout);
     // Collect all forwardable readers into _next, and remove them from
@@ -358,52 +365,51 @@ bool mutation_reader_merger::in_gallop_mode() const {
     return _gallop_mode_hits >= gallop_mode_entering_threshold;
 }
 
-future<mutation_reader_merger::needs_merge> mutation_reader_merger::advance_galloping_reader(db::timeout_clock::time_point timeout) {
-    // When _galloping_reader is present, we assume that it will keep producing fragments
-    // that win over other readers. If that assumption turns out to be no longer true,
-    // this function exits gallop mode and we should proceed with standard merging logic.
-    return (*_galloping_reader.reader)(timeout).then([this] (mutation_fragment_opt mfo) {
+template<mutation_reader_merger::handle_galloping handle_galloping>
+future<mutation_reader_merger::needs_merge> mutation_reader_merger::prepare_one(db::timeout_clock::time_point timeout, reader_and_last_fragment_kind rk) {
+    return (*rk.reader)(timeout).then([this, rk] (mutation_fragment_opt mfo) {
         if (mfo) {
             if (mfo->is_partition_start()) {
-                // Don't assume we will keep winning in the next partition.
-                _reader_heap.emplace_back(_galloping_reader.reader, std::move(*mfo));
+                _reader_heap.emplace_back(rk.reader, std::move(*mfo));
                 boost::push_heap(_reader_heap, reader_heap_compare(*_schema));
-                maybe_add_readers_at_partition_boundary();
             } else {
-                if (_fragment_heap.empty() || position_in_partition::less_compare(*_schema)(mfo->position(), _fragment_heap.front().fragment.position())) {
-                    _current.clear();
-                    _current.push_back(std::move(*mfo));
-                    _galloping_reader.last_kind = _current.back().mutation_fragment_kind();
-                    return needs_merge::no;
+                if constexpr ((bool)handle_galloping) {
+                    // Optimization: assume that galloping reader will keep winning, and compare directly with the heap front.
+                    // If this assumption is correct, we do one key comparison instead of pushing to/popping from the heap.
+                    if (_fragment_heap.empty() || position_in_partition::less_compare(*_schema)(mfo->position(), _fragment_heap.front().fragment.position())) {
+                        _current.clear();
+                        _current.push_back(std::move(*mfo));
+                        _galloping_reader.last_kind = _current.back().mutation_fragment_kind();
+                        return needs_merge::no;
+                    }
+
+                    _gallop_mode_hits = 0;
                 }
 
-                _fragment_heap.emplace_back(_galloping_reader.reader, std::move(*mfo));
-                boost::push_heap(_fragment_heap, fragment_heap_compare(*_schema));
+                _fragment_heap.emplace_back(rk.reader, std::move(*mfo));
+                boost::range::push_heap(_fragment_heap, fragment_heap_compare(*_schema));
             }
         } else {
-            retire_reader(_galloping_reader);
-            maybe_add_readers_at_partition_boundary();
+            retire_reader(std::move(rk));
         }
-        _gallop_mode_hits = 0;
+
+        if constexpr ((bool)handle_galloping) {
+            _gallop_mode_hits = 0;
+        }
         return needs_merge::yes;
+    });
+}
+
+future<mutation_reader_merger::needs_merge> mutation_reader_merger::advance_galloping_reader(db::timeout_clock::time_point timeout) {
+    return prepare_one<handle_galloping::yes>(timeout, _galloping_reader).then([this] (needs_merge needs_merge) {
+        maybe_add_readers_at_partition_boundary();
+        return needs_merge;
     });
 }
 
 future<> mutation_reader_merger::prepare_next(db::timeout_clock::time_point timeout) {
     return parallel_for_each(_next, [this, timeout] (reader_and_last_fragment_kind rk) {
-        return (*rk.reader)(timeout).then([this, rk] (mutation_fragment_opt mfo) {
-            if (mfo) {
-                if (mfo->is_partition_start()) {
-                    _reader_heap.emplace_back(rk.reader, std::move(*mfo));
-                    boost::push_heap(_reader_heap, reader_heap_compare(*_schema));
-                } else {
-                    _fragment_heap.emplace_back(rk.reader, std::move(*mfo));
-                    boost::range::push_heap(_fragment_heap, fragment_heap_compare(*_schema));
-                }
-            } else {
-                retire_reader(rk);
-            }
-        });
+        return prepare_one<handle_galloping::no>(timeout, rk).discard_result();
     }).then([this] {
         _next.clear();
         maybe_add_readers_at_partition_boundary();
