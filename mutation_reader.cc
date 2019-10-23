@@ -197,6 +197,7 @@ private:
     // before entering the gallop mode. It can also be equal to 0, meaning
     // that the gallop mode was stopped (galloping reader lost to some other reader).
     int _gallop_mode_hits = 0;
+    reader_and_last_fragment_kind _single_reader;
     const schema_ptr _schema;
     streamed_mutation::forwarding _fwd_sm;
     mutation_reader::forwarding _fwd_mr;
@@ -352,6 +353,9 @@ void mutation_reader_merger::prepare_forwardable_readers() {
     _next.reserve(_halted_readers.size() + _fragment_heap.size() + _next.size());
 
     std::move(_halted_readers.begin(), _halted_readers.end(), std::back_inserter(_next));
+    if (_single_reader.reader != reader_iterator{}) {
+        _next.emplace_back(std::exchange(_single_reader.reader, {}), _single_reader.last_kind);
+    }
     for (auto& df : _fragment_heap) {
         _next.emplace_back(df.reader, df.fragment.mutation_fragment_kind());
     }
@@ -372,6 +376,26 @@ mutation_reader_merger::mutation_reader_merger(schema_ptr schema,
 }
 
 future<mutation_reader_merger::mutation_fragment_batch> mutation_reader_merger::operator()(db::timeout_clock::time_point timeout) {
+    // Avoid merging-related logic if we know that only a single reader owns
+    // current partition.
+    if (_single_reader.reader != reader_iterator{}) {
+        if (_single_reader.reader->is_buffer_empty()) {
+            if (_single_reader.reader->is_end_of_stream()) {
+                _current.clear();
+                return make_ready_future<mutation_fragment_batch>(_current);
+            }
+            return _single_reader.reader->fill_buffer(timeout).then([this, timeout] { return operator()(timeout); });
+        }
+        _current.clear();
+        _current.emplace_back(_single_reader.reader->pop_mutation_fragment());
+        _single_reader.last_kind = _current.back().mutation_fragment_kind();
+        if (_current.back().is_end_of_partition()) {
+            _next.emplace_back(std::exchange(_single_reader.reader, {}), mutation_fragment::kind::partition_end);
+            _gallop_mode_hits = 0;
+        }
+        return make_ready_future<mutation_fragment_batch>(_current);
+    }
+
     if (!_next.empty()) {
         return prepare_next(timeout).then([this, timeout] { return (*this)(timeout); });
     }
@@ -441,6 +465,12 @@ future<mutation_reader_merger::mutation_fragment_batch> mutation_reader_merger::
             _reader_heap.pop_back();
         }
         while (!_reader_heap.empty() && key(_fragment_heap).equal(*_schema, key(_reader_heap)));
+        if (_fragment_heap.size() == 1) {
+            _single_reader = { _fragment_heap.back().reader, mutation_fragment::kind::partition_start };
+            _current.emplace_back(std::move(_fragment_heap.back().fragment));
+            _fragment_heap.clear();
+            return make_ready_future<mutation_fragment_batch>(_current);
+        }
     }
 
     const auto equal = position_in_partition::equal_compare(*_schema);
@@ -467,6 +497,7 @@ void mutation_reader_merger::next_partition() {
 
 future<> mutation_reader_merger::fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) {
     _gallop_mode_hits = 0;
+    _single_reader = { };
     _next.clear();
     _halted_readers.clear();
     _fragment_heap.clear();
