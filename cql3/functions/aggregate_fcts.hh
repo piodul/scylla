@@ -243,8 +243,18 @@ struct aggregate_type_for<simple_date_native_type> {
 };
 
 template<>
+struct aggregate_type_for<date_type_native_type> {
+    using type = date_type_native_type::primary_type;
+};
+
+template<>
 struct aggregate_type_for<timeuuid_native_type> {
     using type = timeuuid_native_type::primary_type;
+};
+
+template<>
+struct aggregate_type_for<time_native_type> {
+    using type = time_native_type::primary_type;
 };
 
 template <typename Type>

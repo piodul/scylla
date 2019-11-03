@@ -1473,10 +1473,11 @@ struct aggregate_function_test {
     sstring table_name() {
         return "cf_" + _column_type->cql3_type_name();
     }
-    void call_function_and_expect(const char* fname, data_value expected) {
+    void call_function_and_expect(const char* fname, data_type type, data_value expected) {
         auto msg = _e.execute_cql(format("select {}(value) from {}", fname, table_name())).get0();
         assert_that(msg).is_rows()
             .with_size(1)
+            .with_column_types({type})
             .with_row({
                 {expected.serialize()}
             });
@@ -1504,23 +1505,23 @@ public:
         }
     }
     aggregate_function_test& test_min() {
-        call_function_and_expect("min", _sorted_values.front());
+        call_function_and_expect("min", _column_type, _sorted_values.front());
         return *this;
     }
     aggregate_function_test& test_max() {
-        call_function_and_expect("max", _sorted_values.back());
+        call_function_and_expect("max", _column_type, _sorted_values.back());
         return *this;
     }
     aggregate_function_test& test_count() {
-        call_function_and_expect("count", int64_t(_sorted_values.size()));
+        call_function_and_expect("count", long_type, int64_t(_sorted_values.size()));
         return *this;
     }
     aggregate_function_test& test_sum(data_value expected_result) {
-        call_function_and_expect("sum", expected_result);
+        call_function_and_expect("sum", _column_type, expected_result);
         return *this;
     }
     aggregate_function_test& test_avg(data_value expected_result) {
-        call_function_and_expect("avg", expected_result);
+        call_function_and_expect("avg", _column_type, expected_result);
         return *this;
     }
     aggregate_function_test& test_common() {
@@ -1600,6 +1601,12 @@ SEASTAR_TEST_CASE(test_aggregate_functions) {
             now + std::chrono::seconds(2)
         ).test_common();
 
+        // aggregate_function_test(e, date_type,
+        //     date_type_native_type{now},
+        //     date_type_native_type{now + std::chrono::seconds(1)},
+        //     date_type_native_type{now + std::chrono::seconds(2)}
+        // ).test_common();
+
         aggregate_function_test(e, timeuuid_type,
             timeuuid_native_type{utils::UUID("00000000-0000-1000-0000-000000000000")},
             timeuuid_native_type{utils::UUID("00000000-0000-1000-0000-000000000001")},
@@ -1610,6 +1617,24 @@ SEASTAR_TEST_CASE(test_aggregate_functions) {
             utils::UUID("00000000-0000-1000-0000-000000000000"),
             utils::UUID("00000000-0000-1000-0000-000000000001"),
             utils::UUID("00000000-0000-1000-0000-000000000002")
+        ).test_common();
+
+        aggregate_function_test(e, time_type,
+            time_native_type{1},
+            time_native_type{2},
+            time_native_type{3}
+        ).test_common();
+
+        aggregate_function_test(e, inet_addr_type,
+            net::inet_address("1.1.1.1"),
+            net::inet_address("1.1.1.2"),
+            net::inet_address("1.1.2.1")
+        ).test_common();
+
+        aggregate_function_test(e, duration_type,
+            cql_duration("1h10m10s"),
+            cql_duration("1h20m20s"),
+            cql_duration("3h30m30s")
         ).test_common();
 
         aggregate_function_test(e, boolean_type, false, true).test_common();

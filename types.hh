@@ -984,6 +984,12 @@ shared_ptr<const abstract_type> data_type_for<timeuuid_native_type>() {
 
 template <>
 inline
+shared_ptr<const abstract_type> data_type_for<cql_duration>() {
+    return duration_type;
+}
+
+template <>
+inline
 shared_ptr<const abstract_type> data_type_for<net::inet_address>() {
     return inet_addr_type;
 }
