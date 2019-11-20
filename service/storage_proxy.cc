@@ -227,21 +227,27 @@ public:
     explicit shared_mutation(const mutation& m) : shared_mutation(frozen_mutation_and_schema{freeze(m), m.schema()}) {
     }
     virtual bool store_hint(db::hints::manager& hm, gms::inet_address ep, tracing::trace_state_ptr tr_state) override {
+            slogger.trace("(trace) Storing hint, my mutation is {}", (void*)_mutation.get());
             return hm.store_hint(ep, _schema, _mutation, tr_state);
     }
     virtual future<> apply_locally(storage_proxy& sp, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state) override {
         tracing::trace(tr_state, "Executing a mutation locally");
+        slogger.trace("(trace) My mutation is {}", (void*)_mutation.get());
         return sp.mutate_locally(_schema, *_mutation, timeout);
     }
     virtual future<> apply_remotely(storage_proxy& sp, gms::inet_address ep, std::vector<gms::inet_address>&& forward,
             storage_proxy::response_id_type response_id, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state) override {
         tracing::trace(tr_state, "Sending a mutation to /{}", ep);
+        slogger.trace("(trace) Sending a mutation to /{} for {}", ep, response_id);
+        slogger.trace("(trace) My mutation is {}", (void*)_mutation.get());
         auto& ms = netw::get_local_messaging_service();
         return ms.send_mutation(netw::messaging_service::msg_addr{ep, 0}, timeout, *_mutation,
                 std::move(forward), utils::fb_utilities::get_broadcast_address(), engine().cpu_id(),
-                response_id, tracing::make_trace_info(tr_state));
+                response_id, tracing::make_trace_info(tr_state)).then([response_id] {
+                    slogger.trace("(trace) Ended executing a mutation remotely for {}", response_id);
+                });
     }
     virtual bool is_shared() override {
         return true;
@@ -455,6 +461,7 @@ public:
         }
 
         on_timeout();
+        slogger.trace("(trace) Removing response for {} because of timeout", _id);
         _proxy->remove_response_handler(_id);
     }
     db::view::update_backlog max_backlog() {
@@ -1142,6 +1149,7 @@ void storage_proxy::got_response(storage_proxy::response_id_type id, gms::inet_a
     if (it != _response_handlers.end()) {
         tracing::trace(it->second->get_trace_state(), "Got a response from /{}", from);
         if (it->second->response(from)) {
+            slogger.trace("(trace) Removing response for {} because of OK", id);
             remove_response_handler_entry(std::move(it)); // last one, remove entry. Will cancel expiration timer too.
         } else {
             it->second->check_for_early_completion();
@@ -1155,6 +1163,7 @@ void storage_proxy::got_failure_response(storage_proxy::response_id_type id, gms
     if (it != _response_handlers.end()) {
         tracing::trace(it->second->get_trace_state(), "Got {} failures from /{}", count, from);
         if (it->second->failure_response(from, count)) {
+            slogger.trace("(trace) Removing response for {} because of failure", id);
             remove_response_handler_entry(std::move(it));
         } else {
             it->second->check_for_early_completion();
@@ -1490,6 +1499,7 @@ storage_proxy::unique_response_handler::unique_response_handler(storage_proxy& p
 storage_proxy::unique_response_handler::unique_response_handler(unique_response_handler&& x) : id(x.id), p(x.p) { x.id = 0; };
 storage_proxy::unique_response_handler::~unique_response_handler() {
     if (id) {
+        slogger.trace("(trace) Removing response for {} because of unique_response_handler destruction", id);
         p.remove_response_handler(id);
     }
 }
@@ -2219,8 +2229,10 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
 
     // lambda for applying mutation locally
     auto lmutate = [handler_ptr, response_id, this, my_address, timeout] () mutable {
+        slogger.trace("(trace) Executing a mutation locally for {}", response_id);
         return handler_ptr->apply_locally(timeout, handler_ptr->get_trace_state())
                 .then([response_id, this, my_address, h = std::move(handler_ptr), p = shared_from_this()] {
+            slogger.trace("(trace) Ended executing a mutation locally for {}", response_id);
             // make mutation alive until it is processed locally, otherwise it
             // may disappear if write timeouts before this future is ready
             got_response(response_id, my_address, get_view_update_backlog());

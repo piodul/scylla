@@ -1483,6 +1483,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
+    dblog.trace("(trace) Applying mutation (do_apply) of mutation {}", (void*)&m);
     auto uuid = m.column_family_id();
     auto& cf = find_column_family(uuid);
     if (!s->is_synced()) {
@@ -1494,14 +1495,18 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_
     // so it knows when new writes start being sent to a new view.
     auto op = cf.write_in_progress();
     if (cf.views().empty()) {
-        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally([op = std::move(op)] { });
+        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally([op = std::move(op), m = &m] {
+            dblog.trace("(trace) Finished applying mutation {} (path 1)", (void*)m);
+        });
     }
     future<row_locker::lock_holder> f = cf.push_view_replica_updates(s, m, timeout);
     return f.then([this, s = std::move(s), uuid = std::move(uuid), &m, timeout, &cf, op = std::move(op)] (row_locker::lock_holder lock) mutable {
         return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally(
                 // Hold the local lock on the base-table partition or row
                 // taken before the read, until the update is done.
-                [lock = std::move(lock), op = std::move(op)] { });
+                [lock = std::move(lock), op = std::move(op), m = &m] {
+                    dblog.trace("(trace) Finished applying mutation {} (path 2)", (void*)m);
+                });
     });
 }
 
