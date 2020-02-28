@@ -2320,11 +2320,11 @@ future<> storage_proxy::send_to_endpoint(
         std::vector<gms::inet_address> pending_endpoints,
         db::write_type type,
         write_stats& stats,
-        allow_hints allow_hints) {
+        allow_hints allow_hints,
+        std::optional<clock_type::time_point> timeout) {
     utils::latency_counter lc;
     lc.start();
 
-    std::optional<clock_type::time_point> timeout;
     db::consistency_level cl = allow_hints ? db::consistency_level::ANY : db::consistency_level::ONE;
     if (type == db::write_type::VIEW) {
         // View updates have a near-infinite timeout to avoid incurring the extra work of writting hints
@@ -2370,14 +2370,16 @@ future<> storage_proxy::send_to_endpoint(
         gms::inet_address target,
         std::vector<gms::inet_address> pending_endpoints,
         db::write_type type,
-        allow_hints allow_hints) {
+        allow_hints allow_hints,
+        std::optional<clock_type::time_point> timeout) {
     return send_to_endpoint(
             std::make_unique<shared_mutation>(std::move(fm_a_s)),
             std::move(target),
             std::move(pending_endpoints),
             type,
             get_stats(),
-            allow_hints);
+            allow_hints,
+            timeout);
 }
 
 future<> storage_proxy::send_to_endpoint(
@@ -2386,14 +2388,16 @@ future<> storage_proxy::send_to_endpoint(
         std::vector<gms::inet_address> pending_endpoints,
         db::write_type type,
         write_stats& stats,
-        allow_hints allow_hints) {
+        allow_hints allow_hints,
+        std::optional<clock_type::time_point> timeout) {
     return send_to_endpoint(
             std::make_unique<shared_mutation>(std::move(fm_a_s)),
             std::move(target),
             std::move(pending_endpoints),
             type,
             stats,
-            allow_hints);
+            allow_hints,
+            timeout);
 }
 
 future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target) {
