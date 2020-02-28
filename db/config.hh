@@ -208,6 +208,7 @@ public:
     named_value<uint32_t> cas_contention_timeout_in_ms;
     named_value<uint32_t> truncate_request_timeout_in_ms;
     named_value<uint32_t> write_request_timeout_in_ms;
+    named_value<uint32_t> hint_sending_timeout_in_ms;
     named_value<uint32_t> request_timeout_in_ms;
     named_value<bool> cross_node_timeout;
     named_value<uint32_t> internode_send_buff_size_in_bytes;

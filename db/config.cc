@@ -486,6 +486,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , write_request_timeout_in_ms(this, "write_request_timeout_in_ms", value_status::Used, 2000,
         "The time in milliseconds that the coordinator waits for write operations to complete.\n"
         "Related information: About hinted handoff writes")
+    , hint_sending_timeout_in_ms(this, "hint_sending_timeout_in_ms", value_status::Used, 5000,
+        "The time in milliseconds that a hints manager will wait for hint sending to complete. If a confirmation that hint write is finished won't arrive, hint manager will retry sending that hint after some additional delay.")
     , request_timeout_in_ms(this, "request_timeout_in_ms", value_status::Used, 10000,
         "The default timeout for other, miscellaneous operations.\n"
         "Related information: About hinted handoff writes")

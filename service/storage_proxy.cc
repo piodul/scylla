@@ -2401,6 +2401,7 @@ future<> storage_proxy::send_to_endpoint(
 }
 
 future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target) {
+    const auto timeout = db::timeout_clock::now() + std::chrono::milliseconds(_db.local().get_config().hint_sending_timeout_in_ms());
     if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
         return send_to_endpoint(
                 std::make_unique<shared_mutation>(std::move(fm_a_s)),
@@ -2408,7 +2409,8 @@ future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s,
                 { },
                 db::write_type::SIMPLE,
                 get_stats(),
-                allow_hints::no);
+                allow_hints::no,
+                timeout);
     }
 
     return send_to_endpoint(
@@ -2417,11 +2419,12 @@ future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s,
             { },
             db::write_type::SIMPLE,
             get_stats(),
-            allow_hints::no);
+            allow_hints::no,
+            timeout);
 }
 
 future<> storage_proxy::send_hint_to_all_replicas(frozen_mutation_and_schema fm_a_s) {
-    const auto timeout = db::timeout_clock::now() + 1h;
+    const auto timeout = db::timeout_clock::now() + std::chrono::milliseconds(_db.local().get_config().hint_sending_timeout_in_ms());
     if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
         std::array<mutation, 1> ms{fm_a_s.fm.unfreeze(fm_a_s.s)};
         return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit(), timeout);
