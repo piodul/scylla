@@ -43,6 +43,7 @@
 #include "tracing/trace_state.hh"
 #include "cdc_options.hh"
 #include "utils/UUID.hh"
+#include "stats.hh"
 
 class schema;
 using schema_ptr = seastar::lw_shared_ptr<const schema>;

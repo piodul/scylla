@@ -49,6 +49,7 @@
 #include "concrete_types.hh"
 #include "types/listlike_partial_deserializing_iterator.hh"
 #include "tracing/trace_state.hh"
+#include "stats.hh"
 
 namespace std {
 
@@ -66,6 +67,70 @@ logging::logger cdc_log("cdc");
 
 namespace cdc {
 static schema_ptr create_log_schema(const schema&, std::optional<utils::UUID> = {});
+}
+
+static constexpr auto cdc_group_name = "cdc";
+
+void cdc::stats::parts_touched_stats::register_metrics(seastar::metrics::metric_groups& metrics, sstring suffix) {
+    namespace sm = seastar::metrics;
+    auto register_part = [&] (part_type part, sm::label_instance part_instance) {
+        metrics.add_group(cdc_group_name, {
+                sm::make_total_operations("components_touched_" + suffix, count[(size_t)part],
+                        sm::description("number of times a mutation part type have been touched during cdc mutation augmentation"),
+                        {part_instance})
+            });
+    };
+
+    const auto part_label = sm::label("part");
+    register_part(part_type::STATIC_ROW, part_label("static_row"));
+    register_part(part_type::CLUSTERING_ROW, part_label("clustering_row"));
+    register_part(part_type::MAP, part_label("map"));
+    register_part(part_type::SET, part_label("set"));
+    register_part(part_type::LIST, part_label("list"));
+    register_part(part_type::UDT, part_label("udt"));
+    register_part(part_type::RANGE_TOMBSTONE, part_label("range_tombstone"));
+    register_part(part_type::PARTITION_DELETE, part_label("partition_delete"));
+    register_part(part_type::ROW_DELETE, part_label("row_delete"));
+}
+
+cdc::stats::stats() {
+    namespace sm = seastar::metrics;
+
+    auto register_counters = [this] (counters& counters, sstring kind) {
+        const auto split_label = sm::label("split");
+        _metrics.add_group(cdc_group_name, {
+                sm::make_total_operations("ops_" + kind, counters.unsplit_count,
+                        sm::description(format("number of {} cdc operations", kind)),
+                        {split_label(false)}),
+
+                sm::make_total_operations("ops_" + kind, counters.split_count,
+                        sm::description(format("number of {} cdc operations", kind)),
+                        {split_label(true)})
+            });
+
+        counters.touches.register_metrics(_metrics, kind);
+    };
+    register_counters(counters_total, "total");
+    register_counters(counters_failed, "failed");
+
+    auto register_latencies = [this] (histograms& histograms, sm::label_instance succeeded_instance) {
+        _metrics.add_group(cdc_group_name, {
+                sm::make_histogram("ops_latency",
+                        [&histograms] { return histograms.write_latency.get_histogram(16, 20); },
+                        sm::description("latency of combined write operations, one operation includes "
+                                "write of all cdc rows generated from single mutation"),
+                                {succeeded_instance}),
+
+                sm::make_histogram("preimage_select_latency",
+                        [&histograms] { return histograms.preimage_select_latency.get_histogram(16, 20); },
+                        sm::description("latency of preimage queries"),
+                        {succeeded_instance})
+            });
+    };
+
+    const auto succeeded_label = sm::label("succeeded");
+    register_latencies(histograms_succeeded, succeeded_label(false));
+    register_latencies(histograms_failed, succeeded_label(true));
 }
 
 class cdc::cdc_service::impl : service::migration_listener::empty_listener {
