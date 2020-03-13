@@ -1245,7 +1245,12 @@ future<> paxos_response_handler::learn_decision(paxos::proposal decision, bool a
                 auto meta = std::move(std::get<1>(t));
                 // Pick only the CDC ("augmenting") mutations
                 auto range = boost::make_iterator_range(mutations.end() - meta.total_cdc_mutations, mutations.end());
-                return _proxy->mutate_internal(std::move(range), _cl_for_learn, false, tr_state, _permit, _timeout);
+                // Need to adjust ranges in the metadata, because we are going to skip non-CDC mutations
+                for (auto& range : meta.generated_ranges) {
+                    range.begin -= meta.total_cdc_mutations;
+                    range.end -= meta.total_cdc_mutations;
+                }
+                return _proxy->mutate_internal(std::move(range), _cl_for_learn, false, tr_state, _permit, _timeout, std::move(meta));
             });
         }
     }
