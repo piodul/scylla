@@ -88,6 +88,7 @@
 #include "database.hh"
 #include "db/consistency_level_validations.hh"
 #include "cdc/log.hh"
+#include "cdc/stats.hh"
 
 namespace bi = boost::intrusive;
 
@@ -330,6 +331,43 @@ public:
     }
 };
 
+// Tracks the success of a set of CDC mutations generated from the same mutation
+// Used to updated CDC-related metrics
+struct cdc_augmentation_tracker {
+private:
+    ::cdc::stats& _stats;
+    bool _had_error;
+    bool _was_split;
+    ::cdc::stats::part_type_set _touches;
+    utils::latency_counter _lc;
+
+public:
+    cdc_augmentation_tracker(::cdc::stats& s, bool was_split, ::cdc::stats::part_type_set touches, utils::latency_counter lc)
+        : _stats(s)
+        , _had_error(false)
+        , _was_split(was_split)
+        , _touches(touches)
+        , _lc(lc)
+    {}
+
+    ~cdc_augmentation_tracker() {
+        auto& histograms = _had_error ? _stats.histograms_failed : _stats.histograms_succeeded;
+        histograms.write_latency.add(_lc.stop().latency(), histograms.write_latency._count + 1);
+        if (_had_error) {
+            if (_was_split) {
+                _stats.counters_failed.split_count++;
+            } else {
+                _stats.counters_failed.unsplit_count++;
+            }
+            _stats.counters_failed.touches.apply(_touches);
+        }
+    }
+
+    void count_failure() {
+        _had_error = true;
+    }
+};
+
 class abstract_write_response_handler : public seastar::enable_shared_from_this<abstract_write_response_handler> {
 protected:
     storage_proxy::response_id_type _id;
@@ -358,6 +396,7 @@ protected:
     size_t _all_failures = 0; // total amount of failures
     size_t _total_endpoints = 0;
     storage_proxy::write_stats& _stats;
+    lw_shared_ptr<cdc_augmentation_tracker> _augmentation_tracker;
     timer<storage_proxy::clock_type> _expire_timer;
     service_permit _permit; // holds admission permit until operation completes
 
@@ -391,14 +430,23 @@ public:
                 _proxy->_global_stats.background_write_bytes -= _mutation_holder->size();
                 _proxy->unthrottle();
             }
-        } else if (_error == error::TIMEOUT) {
-            _ready.set_exception(mutation_write_timeout_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _total_block_for, _type));
-        } else if (_error == error::FAILURE) {
-            _ready.set_exception(mutation_write_failure_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _failed, _total_block_for, _type));
+        } else {
+            if (_error == error::TIMEOUT) {
+                _ready.set_exception(mutation_write_timeout_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _total_block_for, _type));
+            } else if (_error == error::FAILURE) {
+                _ready.set_exception(mutation_write_failure_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _failed, _total_block_for, _type));
+            }
+            if (_augmentation_tracker) {
+                _augmentation_tracker->count_failure();
+            }
         }
     }
     bool is_counter() const {
         return _type == db::write_type::COUNTER;
+    }
+
+    void set_augmentation_tracker(lw_shared_ptr<cdc_augmentation_tracker> tracker) {
+        _augmentation_tracker = std::move(tracker);
     }
 
     // While delayed, a request is not throttled.
@@ -1884,6 +1932,16 @@ storage_proxy::create_write_response_handler(const std::tuple<paxos::proposal, s
 
     return create_write_response_handler(ks, cl, db::write_type::CAS, std::make_unique<cas_mutation>(std::move(commit), s), std::move(endpoints),
                     std::vector<gms::inet_address>(), std::vector<gms::inet_address>(), std::move(tr_state), get_stats(), std::move(permit));
+}
+
+void storage_proxy::register_cdc_augmentation_trackers(const std::vector<storage_proxy::unique_response_handler>& ids, const cdc::augmentation_metadata& meta, utils::latency_counter lc) {
+    for (const auto& range : meta.generated_ranges) {
+        auto tracker = make_lw_shared<cdc_augmentation_tracker>(_cdc_stats, range.was_split, range.touched_parts, lc);
+        for (size_t idx : boost::irange(range.begin, range.end)) {
+            auto& h = get_write_response_handler(ids[idx].id);
+            h->set_augmentation_tracker(tracker);
+        }
+    }
 }
 
 void

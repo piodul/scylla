@@ -89,6 +89,7 @@ class one_or_two_partition_ranges;
 }
 
 namespace cdc {
+    struct augmentation_metadata;
     class cdc_service;    
 }
 
@@ -320,6 +321,7 @@ private:
             db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit);
     response_id_type create_write_response_handler(const std::tuple<paxos::proposal, schema_ptr, dht::token, std::unordered_set<gms::inet_address>>& meta,
             db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit);
+    void register_cdc_augmentation_trackers(const std::vector<storage_proxy::unique_response_handler>& ids, const cdc::augmentation_metadata& meta, utils::latency_counter lc);
     void send_to_live_endpoints(response_id_type response_id, clock_type::time_point timeout);
     template<typename Range>
     size_t hint_to_dead_endpoints(std::unique_ptr<mutation_holder>& mh, const Range& targets, db::write_type type, tracing::trace_state_ptr tr_state) noexcept;
