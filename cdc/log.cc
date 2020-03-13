@@ -1308,25 +1308,33 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
             }
 
             transformer trans(_ctxt, s);
+            auto& stats = _ctxt._proxy.get_cdc_stats();
 
             auto f = make_ready_future<lw_shared_ptr<cql3::untyped_result_set>>(nullptr);
             if (s->cdc_options().preimage() || s->cdc_options().postimage()) {
                 // Note: further improvement here would be to coalesce the pre-image selects into one
                 // iff a batch contains several modifications to the same table. Otoh, batch is rare(?)
                 // so this is premature.
+                utils::latency_counter lc;
+                lc.start();
                 tracing::trace(tr_state, "CDC: Selecting preimage for {}", m.decorated_key());
-                f = trans.pre_image_select(qs.get_client_state(), db::consistency_level::LOCAL_QUORUM, m);
+                f = trans.pre_image_select(qs.get_client_state(), db::consistency_level::LOCAL_QUORUM, m).then_wrapped([&stats, lc] (future<lw_shared_ptr<cql3::untyped_result_set>> f) mutable {
+                    auto& h_stats = f.failed() ? stats.histograms_failed : stats.histograms_succeeded;
+                    h_stats.preimage_select_latency.add(lc.stop().latency(), h_stats.preimage_select_latency._count + 1);
+                    return f;
+                });
             } else {
                 tracing::trace(tr_state, "CDC: Preimage not enabled for the table, not querying current value of {}", m.decorated_key());
             }
 
-            return f.then([trans = std::move(trans), &mutations, idx, tr_state = std::move(tr_state)] (lw_shared_ptr<cql3::untyped_result_set> rs) {
+            return f.then([trans = std::move(trans), &mutations, idx, tr_state = std::move(tr_state), &stats] (lw_shared_ptr<cql3::untyped_result_set> rs) mutable {
                 auto& m = mutations[idx];
                 auto& s = m.schema();
                 tracing::trace(tr_state, "CDC: Generating log mutations for {}", m.decorated_key());
                 int generated_count;
                 stats::part_type_set touched_parts;
                 if (should_split(m, *s)) {
+                    stats.counters_total.split_count++;
                     tracing::trace(tr_state, "CDC: Splitting {}", m.decorated_key());
                     generated_count = 0;
                     for_each_change(m, s, [&] (mutation mm, api::timestamp_type ts, bytes tuuid, int& batch_no) {
@@ -1337,6 +1345,7 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                     });
                 } else {
                     tracing::trace(tr_state, "CDC: No need to split {}", m.decorated_key());
+                    stats.counters_total.unsplit_count++;
                     int batch_no = 0;
                     auto ts = find_timestamp(*s, m);
                     auto tuuid = timeuuid_type->decompose(generate_timeuuid(ts));
@@ -1347,6 +1356,7 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                 }
                 // `m` might be invalidated at this point because of the push_back to the vector
                 tracing::trace(tr_state, "CDC: Generated {} log mutations from {}", generated_count, mutations[idx].decorated_key());
+                stats.counters_total.touches.apply(touched_parts);
             });
         }).then([tr_state](std::vector<mutation> mutations) {
             tracing::trace(tr_state, "CDC: Finished generating all log mutations");
