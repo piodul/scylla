@@ -799,18 +799,21 @@ public:
 
     // TODO: is pre-image data based on query enough. We only have actual column data. Do we need
     // more details like tombstones/ttl? Probably not but keep in mind.
-    mutation transform(const mutation& m, const cql3::untyped_result_set* rs, api::timestamp_type ts, bytes tuuid, int& batch_no) const {
+    std::tuple<mutation, stats::part_type_set> transform(const mutation& m, const cql3::untyped_result_set* rs, api::timestamp_type ts, bytes tuuid, int& batch_no) const {
         auto stream_id = _ctx._cdc_metadata.get_stream(ts, m.token());
         mutation res(_log_schema, stream_id.to_partition_key(*_log_schema));
         const auto postimage = _schema->cdc_options().postimage();
+        stats::part_type_set touched_parts;
         auto& p = m.partition();
         if (p.partition_tombstone()) {
             // Partition deletion
+            touched_parts.set<stats::part_type::PARTITION_DELETE>();
             auto log_ck = set_pk_columns(m.key(), ts, tuuid, 0, res);
             set_operation(log_ck, ts, operation::partition_delete, res);
             ++batch_no;
         } else if (!p.row_tombstones().empty()) {
             // range deletion
+            touched_parts.set<stats::part_type::RANGE_TOMBSTONE>();
             for (auto& rt : p.row_tombstones()) {
                 auto set_bound = [&] (const clustering_key& log_ck, const clustering_key_prefix& ckp) {
                     auto exploded = ckp.explode(*_schema);
@@ -910,6 +913,7 @@ public:
                             return visit(*cdef.type, make_visitor(
                                 // maps and lists are just flattened
                                 [&] (const collection_type_impl& type) -> bytes_opt {
+                                    touched_parts.set(type.is_list() ? stats::part_type::LIST : stats::part_type::MAP);
                                     std::vector<std::pair<bytes_view, bytes_view>> result;
                                     process_collection([&](const bytes_view& key, const bytes_view& value, bool live) {
                                         if (live) {
@@ -928,6 +932,7 @@ public:
                                 },
                                 // set need to transform from mutation view
                                 [&] (const set_type_impl& type) -> bytes_opt  {
+                                    touched_parts.set<stats::part_type::SET>();
                                     std::vector<bytes_view> result;
                                     process_collection([&](const bytes_view& key, const bytes_view& value, bool live) {
                                         if (live) {
@@ -948,6 +953,7 @@ public:
                                 // tuple of value or tuple of null in case of delete.
                                 // fields not in the mutation are null in the enclosing tuple, signifying "no info"
                                 [&](const user_type_impl& type) -> bytes_opt  {
+                                    touched_parts.set<stats::part_type::UDT>();
                                     std::vector<bytes_opt> result(type.size());
                                     process_collection([&](const bytes_view& key, const bytes_view& value, bool live) {
                                         if (live) {
@@ -1028,6 +1034,7 @@ public:
             };
 
             if (!p.static_row().empty()) {
+                touched_parts.set<stats::part_type::STATIC_ROW>();
                 std::optional<clustering_key> pikey, poikey;
                 const cql3::untyped_result_set_row * pirow = nullptr;
 
@@ -1055,6 +1062,7 @@ public:
                 }
                 ++batch_no;
             } else {
+                touched_parts.set_if<stats::part_type::CLUSTERING_ROW>(!p.clustered_rows().empty());
                 for (const rows_entry& r : p.clustered_rows()) {
                     auto ck_value = r.key().explode(*_schema);
 
@@ -1108,6 +1116,7 @@ public:
                     
                     operation cdc_op;
                     if (r.row().deleted_at()) {
+                        touched_parts.set<stats::part_type::ROW_DELETE>();
                         cdc_op = operation::row_delete;
                         if (pirow) {
                             for (const column_definition& column: _schema->regular_columns()) {
@@ -1136,7 +1145,7 @@ public:
             }
         }
 
-        return res;
+        return std::make_tuple(std::move(res), touched_parts);
     }
 
     static bytes get_preimage_col_value(const column_definition& cdef, const cql3::untyped_result_set_row *pirow) {
@@ -1316,20 +1325,25 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                 auto& s = m.schema();
                 tracing::trace(tr_state, "CDC: Generating log mutations for {}", m.decorated_key());
                 int generated_count;
+                stats::part_type_set touched_parts;
                 if (should_split(m, *s)) {
                     tracing::trace(tr_state, "CDC: Splitting {}", m.decorated_key());
                     generated_count = 0;
                     for_each_change(m, s, [&] (mutation mm, api::timestamp_type ts, bytes tuuid, int& batch_no) {
-                        mutations.push_back(trans.transform(std::move(mm), rs.get(), ts, tuuid, batch_no));
+                        auto [mut, parts] = trans.transform(std::move(mm), rs.get(), ts, tuuid, batch_no);
+                        mutations.push_back(std::move(mut));
                         ++generated_count;
+                        touched_parts.add(parts);
                     });
                 } else {
                     tracing::trace(tr_state, "CDC: No need to split {}", m.decorated_key());
                     int batch_no = 0;
                     auto ts = find_timestamp(*s, m);
                     auto tuuid = timeuuid_type->decompose(generate_timeuuid(ts));
-                    mutations.push_back(trans.transform(m, rs.get(), ts, tuuid, batch_no));
+                    auto [mut, parts] = trans.transform(m, rs.get(), ts, tuuid, batch_no);
+                    mutations.push_back(std::move(mut));
                     generated_count = 1;
+                    touched_parts = parts;
                 }
                 // `m` might be invalidated at this point because of the push_back to the vector
                 tracing::trace(tr_state, "CDC: Generated {} log mutations from {}", generated_count, mutations[idx].decorated_key());
