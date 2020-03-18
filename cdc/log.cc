@@ -118,6 +118,22 @@ cdc::stats::stats() {
     register_counters(counters_failed, "failed");
 }
 
+cdc::operation_result_tracker::~operation_result_tracker() {
+    auto update_stats = [this] (stats::counters& counters) {
+        if (_was_split) {
+            counters.split_count++;
+        } else {
+            counters.unsplit_count++;
+        }
+        counters.touches.apply(_touched_parts);
+    };
+
+    update_stats(_stats.counters_total);
+    if (_failed) {
+        update_stats(_stats.counters_failed);
+    }
+}
+
 class cdc::cdc_service::impl : service::migration_listener::empty_listener {
     friend cdc_service;
     db_context _ctxt;

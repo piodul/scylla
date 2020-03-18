@@ -87,4 +87,27 @@ public:
     stats();
 };
 
+// This object tracks the lifetime of write handlers related to one CDC operation. After all
+// write handlers for the operation finish, CDC metrics are updated.
+struct operation_result_tracker {
+private:
+    stats& _stats;
+    stats::part_type_set _touched_parts;
+    bool _was_split;
+    bool _failed;
+
+public:
+    operation_result_tracker(stats& stats, stats::part_type_set touched_parts, bool was_split)
+        : _stats(stats)
+        , _touched_parts(touched_parts)
+        , _was_split(was_split)
+        , _failed(false)
+    {}
+    ~operation_result_tracker();
+
+    void on_mutation_failed() {
+        _failed = true;
+    }
+};
+
 }
