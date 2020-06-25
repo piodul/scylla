@@ -31,8 +31,14 @@ class mutation;
 
 namespace cdc {
 
+using preimage_processing_func = seastar::noncopyable_function<void(column_kind, const clustering_key*, api::timestamp_type, bytes)>;
+using postimage_processing_func = seastar::noncopyable_function<void(column_kind, const clustering_key*, api::timestamp_type, bytes)>;
+using delta_processing_func = seastar::noncopyable_function<void(mutation, api::timestamp_type, bytes, int&)>;
+
 bool should_split(const mutation& base_mutation, const schema& base_schema);
 void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema,
-        seastar::noncopyable_function<void(mutation, api::timestamp_type, bytes, int&)>);
+        preimage_processing_func preimage_f,
+        postimage_processing_func postimage_f,
+        delta_processing_func delta_f);
 
 }

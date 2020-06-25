@@ -834,6 +834,10 @@ private:
      */
     std::unordered_set<const column_definition*> _non_atomic_column_deletes;
 
+    using cell_map = std::unordered_map<const column_definition*, bytes_opt>;
+    std::unordered_map<clustering_key, cell_map, clustering_key::hashing, clustering_key::equality> _clustering_row_states;
+    std::optional<cell_map> _static_row_state;
+
     clustering_key set_pk_columns(const partition_key& pk, api::timestamp_type ts, bytes decomposed_tuuid, int batch_no, mutation& m) const {
         const auto log_ck = clustering_key::from_exploded(
                 *m.schema(), { decomposed_tuuid, int32_type->decompose(batch_no) });
@@ -867,6 +871,7 @@ public:
         , _log_schema(ctx._proxy.get_db().local().find_schema(_schema->ks_name(), log_name(_schema->cf_name())))
         , _op_col(*_log_schema->get_column_definition(log_meta_column_name_bytes("operation")))
         , _ttl_col(*_log_schema->get_column_definition(log_meta_column_name_bytes("ttl")))
+        , _clustering_row_states(8, clustering_key::hashing(*_schema), clustering_key::equality(*_schema))
     {
         if (_schema->cdc_options().ttl()) {
             _cdc_ttl_opt = std::chrono::seconds(_schema->cdc_options().ttl());
@@ -1284,6 +1289,8 @@ public:
         return std::make_tuple(std::move(res), touched_parts);
     }
 
+    // bytes_opt get_current_col_value(const column_definition& cdef, const cql3::untyped_result_set_row *pirow)
+
     bytes_opt get_preimage_col_value(const column_definition& cdef, const cql3::untyped_result_set_row *pirow) {
         /**
          * #6070 - see comment for _non_atomic_column_deletes
@@ -1502,12 +1509,18 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                     tracing::trace(tr_state, "CDC: Splitting {}", m.decorated_key());
                     details.was_split = true;
                     generated_count = 0;
-                    for_each_change(m, s, [&] (mutation mm, api::timestamp_type ts, bytes tuuid, int& batch_no) {
+
+                    auto preimage_f = [&] (column_kind kind, const clustering_key* ck, api::timestamp_type ts, bytes tuuid) {};
+                    auto postimage_f = [&] (column_kind kind, const clustering_key* ck, api::timestamp_type ts, bytes tuuid) {};
+
+                    auto delta_f = [&] (mutation mm, api::timestamp_type ts, bytes tuuid, int& batch_no) {
                         auto [mut, parts] = trans.transform(std::move(mm), rs.get(), ts, tuuid, batch_no);
                         mutations.push_back(std::move(mut));
                         ++generated_count;
                         details.touched_parts.add(parts);
-                    });
+                    };
+
+                    for_each_change(m, s, std::move(preimage_f), std::move(postimage_f), std::move(delta_f));
                 } else {
                     tracing::trace(tr_state, "CDC: No need to split {}", m.decorated_key());
                     int batch_no = 0;
