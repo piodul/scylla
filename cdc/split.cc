@@ -79,9 +79,12 @@ struct batch {
     std::optional<partition_deletion> partition_deletions;
 
     std::unordered_set<clustering_key, clustering_key::hashing, clustering_key::equality> changed_clustering_rows;
-    bool is_static_row_changed = false;
 
-    batch(const schema& s) : changed_clustering_rows(8, clustering_key::hashing(s), clustering_key::equality(s)) {}
+    inline bool is_static_row_changed() const {
+        return !static_updates.empty();
+    }
+
+    batch(const schema& s) : changed_clustering_rows(0, clustering_key::hashing(s), clustering_key::equality(s)) {}
 };
 
 // struct set_of_changes {
@@ -190,9 +193,12 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
             // in increasing TTL order. The reason is explained in a comment in cdc/log.cc,
             // search for "#6070".
             auto [timestamp, ttl] = k;
+            auto& batch = batch_at(timestamp);
+
+            batch.changed_clustering_rows.insert(cr.key());
 
             if (is_insert(timestamp, ttl)) {
-                batch_at(timestamp).clustered_inserts.push_back({
+                batch.clustered_inserts.push_back({
                         ttl,
                         cr.key(),
                         marker,
@@ -200,7 +206,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                         {}
                     });
 
-                auto& cr_insert = batch_at(timestamp).clustered_inserts.back();
+                auto& cr_insert = batch.clustered_inserts.back();
                 bool clustered_update_exists = false;
                 for (auto& nonatomic_up: up.nonatomic_entries) {
                     // Updating a collection column with an INSERT statement implies inserting a tombstone.
@@ -228,7 +234,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                         cr_insert.nonatomic_entries.push_back(std::move(nonatomic_up));
                     } else {
                         if (!clustered_update_exists) {
-                            batch_at(timestamp).clustered_updates.push_back({
+                            batch.clustered_updates.push_back({
                                 ttl,
                                 cr.key(),
                                 {},
@@ -251,12 +257,12 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                             clustered_update_exists = true;
                         }
 
-                        auto& cr_update = batch_at(timestamp).clustered_updates.back();
+                        auto& cr_update = batch.clustered_updates.back();
                         cr_update.nonatomic_entries.push_back(std::move(nonatomic_up));
                     }
                 }
             } else {
-                batch_at(timestamp).clustered_updates.push_back({
+                batch.clustered_updates.push_back({
                         ttl,
                         cr.key(),
                         std::move(up.atomic_entries),
