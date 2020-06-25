@@ -78,8 +78,10 @@ struct batch {
     std::vector<clustered_range_deletion> clustered_range_deletions;
     std::optional<partition_deletion> partition_deletions;
 
-    std::vector<clustering_key> changed_clustering_rows;
+    std::unordered_set<clustering_key, clustering_key::hashing, clustering_key::equality> changed_clustering_rows;
     bool is_static_row_changed = false;
+
+    batch(const schema& s) : changed_clustering_rows(8, clustering_key::hashing(s), clustering_key::equality(s)) {}
 };
 
 // struct set_of_changes {
@@ -148,11 +150,16 @@ extract_row_updates(const row& r, column_kind ckind, const schema& schema) {
 set_of_changes extract_changes(const mutation& base_mutation, const schema& base_schema) {
     set_of_changes res;
     auto& p = base_mutation.partition();
+    auto& s = *base_mutation.schema();
+
+    auto batch_at = [&] (api::timestamp_type ts) -> batch& {
+        return res.try_emplace(ts, s).first->second;
+    };
 
     auto sr_updates = extract_row_updates(p.static_row().get(), column_kind::static_column, base_schema);
     for (auto& [k, up]: sr_updates) {
         auto [timestamp, ttl] = k;
-        res[timestamp].static_updates.push_back({
+        batch_at(timestamp).static_updates.push_back({
                 ttl,
                 std::move(up.atomic_entries),
                 std::move(up.nonatomic_entries)
@@ -185,7 +192,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
             auto [timestamp, ttl] = k;
 
             if (is_insert(timestamp, ttl)) {
-                res[timestamp].clustered_inserts.push_back({
+                batch_at(timestamp).clustered_inserts.push_back({
                         ttl,
                         cr.key(),
                         marker,
@@ -193,7 +200,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                         {}
                     });
 
-                auto& cr_insert = res[timestamp].clustered_inserts.back();
+                auto& cr_insert = batch_at(timestamp).clustered_inserts.back();
                 bool clustered_update_exists = false;
                 for (auto& nonatomic_up: up.nonatomic_entries) {
                     // Updating a collection column with an INSERT statement implies inserting a tombstone.
@@ -221,7 +228,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                         cr_insert.nonatomic_entries.push_back(std::move(nonatomic_up));
                     } else {
                         if (!clustered_update_exists) {
-                            res[timestamp].clustered_updates.push_back({
+                            batch_at(timestamp).clustered_updates.push_back({
                                 ttl,
                                 cr.key(),
                                 {},
@@ -244,12 +251,12 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                             clustered_update_exists = true;
                         }
 
-                        auto& cr_update = res[timestamp].clustered_updates.back();
+                        auto& cr_update = batch_at(timestamp).clustered_updates.back();
                         cr_update.nonatomic_entries.push_back(std::move(nonatomic_up));
                     }
                 }
             } else {
-                res[timestamp].clustered_updates.push_back({
+                batch_at(timestamp).clustered_updates.push_back({
                         ttl,
                         cr.key(),
                         std::move(up.atomic_entries),
@@ -260,19 +267,19 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
 
         auto row_tomb = cr.row().deleted_at().regular();
         if (row_tomb) {
-            res[row_tomb.timestamp].clustered_row_deletions.push_back({cr.key(), row_tomb});
+            batch_at(row_tomb.timestamp).clustered_row_deletions.push_back({cr.key(), row_tomb});
         }
     }
 
     for (const auto& rt: p.row_tombstones()) {
         if (rt.tomb.timestamp != api::missing_timestamp) {
-            res[rt.tomb.timestamp].clustered_range_deletions.push_back({rt});
+            batch_at(rt.tomb.timestamp).clustered_range_deletions.push_back({rt});
         }
     }
 
     auto partition_tomb_timestamp = p.partition_tombstone().timestamp;
     if (partition_tomb_timestamp != api::missing_timestamp) {
-        res[partition_tomb_timestamp].partition_deletions = {p.partition_tombstone()};
+        batch_at(partition_tomb_timestamp).partition_deletions = {p.partition_tombstone()};
     }
 
     return res;
