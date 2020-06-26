@@ -22,6 +22,7 @@
 #pragma once
 
 #include <vector>
+#include <unordered_set>
 #include "schema_fwd.hh"
 #include "timestamp.hh"
 #include "bytes.hh"
@@ -31,14 +32,16 @@ class mutation;
 
 namespace cdc {
 
-using preimage_processing_func = seastar::noncopyable_function<void(column_kind, const clustering_key*, api::timestamp_type, bytes)>;
-using postimage_processing_func = seastar::noncopyable_function<void(column_kind, const clustering_key*, api::timestamp_type, bytes)>;
+using cells_set = std::unordered_set<column_id>;
+
+using preimage_processing_func = seastar::noncopyable_function<void(const dht::decorated_key&, const clustering_key*, std::optional<cells_set>, api::timestamp_type, bytes, int&)>;
+using postimage_processing_func = seastar::noncopyable_function<void(const dht::decorated_key&, const clustering_key*, std::optional<cells_set>, api::timestamp_type, bytes, int&)>;
 using delta_processing_func = seastar::noncopyable_function<void(mutation, api::timestamp_type, bytes, int&)>;
 
 bool should_split(const mutation& base_mutation, const schema& base_schema);
 void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema,
-        preimage_processing_func preimage_f,
-        postimage_processing_func postimage_f,
+        std::optional<preimage_processing_func> preimage_f,
+        std::optional<postimage_processing_func> postimage_f,
         delta_processing_func delta_f);
 
 }

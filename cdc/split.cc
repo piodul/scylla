@@ -70,6 +70,8 @@ struct partition_deletion {
     tombstone t;
 };
 
+using clustered_cells_set = std::map<clustering_key, cdc::cells_set, clustering_key::less_compare>;
+
 struct batch {
     std::vector<static_row_update> static_updates;
     std::vector<clustered_row_insert> clustered_inserts;
@@ -78,29 +80,44 @@ struct batch {
     std::vector<clustered_range_deletion> clustered_range_deletions;
     std::optional<partition_deletion> partition_deletions;
 
-    std::unordered_set<clustering_key, clustering_key::hashing, clustering_key::equality> changed_clustering_rows;
+    clustered_cells_set get_affected_clustered_cells(const schema& s) const {
+        clustered_cells_set ret{clustering_key::less_compare(s)};
 
-    inline bool is_static_row_changed() const {
-        return !static_updates.empty();
+        auto process_change_type = [&] (const auto& changes) {
+            for (const auto& change : changes) {
+                auto& cset = ret[change.key];
+                for (const auto& entry : change.atomic_entries) {
+                    cset.insert(entry.id);
+                }
+                for (const auto& entry : change.nonatomic_entries) {
+                    cset.insert(entry.id);
+                }
+            }
+        };
+
+        process_change_type(clustered_inserts);
+        process_change_type(clustered_updates);
+
+        return ret;
     }
 
-    batch(const schema& s) : changed_clustering_rows(0, clustering_key::hashing(s), clustering_key::equality(s)) {}
+    cdc::cells_set get_affected_static_cells() const {
+        cdc::cells_set ret;
+
+        for (const auto& change : static_updates) {
+            for (const auto& entry : change.atomic_entries) {
+                ret.insert(entry.id);
+            }
+            for (const auto& entry : change.nonatomic_entries) {
+                ret.insert(entry.id);
+            }
+        }
+
+        return ret;
+    }
 };
 
-// struct set_of_changes {
-    // template<typename T> using clustering_row_map = std::unordered_map<clustering_key, T, clustering_key::hashing, clustering_key::equality>;
-
-    // std::map<api::timestamp_type, batch> changes;
-
-    // // For each row, determines what is the maximum timestamp where a row is modified in
-    // clustering_row_map<api::timestamp_type> clustering_row_max_timestamp;
-
-    // // Same as above, but for the static row
-    // api::timestamp_type static_row_max_timestamp;
-// };
-
 using set_of_changes = std::map<api::timestamp_type, batch>;
-// using max_timstamp_of_row = std::unordered_map<clustering_key, api::timestamp_type, clustering_key::hashing, clustering_key::equality>;
 
 struct row_update {
     std::vector<atomic_column_update> atomic_entries;
@@ -153,10 +170,9 @@ extract_row_updates(const row& r, column_kind ckind, const schema& schema) {
 set_of_changes extract_changes(const mutation& base_mutation, const schema& base_schema) {
     set_of_changes res;
     auto& p = base_mutation.partition();
-    auto& s = *base_mutation.schema();
 
     auto batch_at = [&] (api::timestamp_type ts) -> batch& {
-        return res.try_emplace(ts, s).first->second;
+        return res.try_emplace(ts).first->second;
     };
 
     auto sr_updates = extract_row_updates(p.static_row().get(), column_kind::static_column, base_schema);
@@ -194,8 +210,6 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
             // search for "#6070".
             auto [timestamp, ttl] = k;
             auto& batch = batch_at(timestamp);
-
-            batch.changed_clustering_rows.insert(cr.key());
 
             if (is_insert(timestamp, ttl)) {
                 batch.clustered_inserts.push_back({
@@ -445,15 +459,33 @@ bool should_split(const mutation& base_mutation, const schema& base_schema) {
 }
 
 void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema,
-        preimage_processing_func preimage_f,
-        postimage_processing_func postimage_f,
+        std::optional<preimage_processing_func> preimage_f,
+        std::optional<postimage_processing_func> postimage_f,
         delta_processing_func delta_f) {
     auto changes = extract_changes(base_mutation, *base_schema);
-    auto pk = base_mutation.key();
+    auto dk = base_mutation.decorated_key();
+    auto pk = dk.key();
 
     for (auto& [change_ts, btch] : changes) {
         auto tuuid = timeuuid_type->decompose(generate_timeuuid(change_ts));
         int batch_no = 0;
+
+        clustered_cells_set affected_clustered_cells{clustering_key::less_compare(*base_schema)};
+        cells_set affected_static_cells;
+
+        if (preimage_f || postimage_f) {
+            affected_clustered_cells = btch.get_affected_clustered_cells(*base_mutation.schema());
+            affected_static_cells = btch.get_affected_static_cells();
+        }
+
+        if (preimage_f) {
+            for (const auto& [ck, crow] : affected_clustered_cells) {
+                (*preimage_f)(dk, &ck, crow, change_ts, tuuid, batch_no);
+            }
+            if (!affected_static_cells.empty()) {
+                (*preimage_f)(dk, nullptr, affected_static_cells, change_ts, tuuid, batch_no);
+            }
+        }
 
         for (auto& sr_update : btch.static_updates) {
             mutation m(base_schema, pk);
@@ -517,6 +549,15 @@ void for_each_change(const mutation& base_mutation, const schema_ptr& base_schem
             mutation m(base_schema, pk);
             m.partition().apply(btch.partition_deletions->t);
             delta_f(std::move(m), change_ts, tuuid, batch_no);
+        }
+
+        if (postimage_f) {
+            for (const auto& [ck, crow] : affected_clustered_cells) {
+                (*postimage_f)(dk, &ck, std::nullopt, change_ts, tuuid, batch_no);
+            }
+            if (!affected_static_cells.empty()) {
+                (*postimage_f)(dk, nullptr, std::nullopt, change_ts, tuuid, batch_no);
+            }
         }
     }
 }
