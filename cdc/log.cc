@@ -832,7 +832,7 @@ private:
      * which modifies a collection column as above, the row marker call will happen first;
      * its post-image will still show {1:1} for the collection column. Good.
      */
-    std::unordered_set<const column_definition*> _non_atomic_column_deletes;
+    // TODO: Fix the comment above?
 
     using cell_map = std::unordered_map<const column_definition*, bytes_opt>;
     std::unordered_map<clustering_key, cell_map, clustering_key::hashing, clustering_key::equality> _clustering_row_states;
@@ -937,7 +937,7 @@ public:
         throw std::runtime_error(format("cdc merge: unknown type {}", type.name()));
     }
 
-    mutation generate_image(const dht::decorated_key& dk, operation op, const clustering_key* ck, std::optional<cells_set> affected_cells, api::timestamp_type ts, bytes tuuid, int& batch_no, const cql3::untyped_result_set_row *pirow) {
+    mutation generate_image(const dht::decorated_key& dk, operation op, const clustering_key* ck, std::optional<cells_set> affected_cells, api::timestamp_type ts, bytes tuuid, int& batch_no) {
         assert(op == operation::pre_image || op == operation::post_image);
 
         auto stream_id = _ctx._cdc_metadata.get_stream(ts, dk.token());
@@ -964,7 +964,7 @@ public:
         const auto kind = ck ? column_kind::regular_column : column_kind::static_column;
 
         auto process_cell = [&, this] (const column_definition& cdef) {
-            bytes_opt current = get_current_col_value(ck, cdef, nullptr /* TODO */);
+            bytes_opt current = get_current_col_value(ck, cdef);
             if (current) {
                 auto log_cdef = _log_schema->get_column_definition(log_data_column_name_bytes(cdef.name()));
                 res.set_cell(image_ck, *log_cdef, atomic_cell::make_live(*cdef.type, ts, *current, _cdc_ttl_opt));
@@ -986,13 +986,9 @@ public:
 
     // TODO: is pre-image data based on query enough. We only have actual column data. Do we need
     // more details like tombstones/ttl? Probably not but keep in mind.
-    std::tuple<mutation, stats::part_type_set> transform(const mutation& m, const cql3::untyped_result_set* rs, api::timestamp_type ts, bytes tuuid, int& batch_no) {
+    std::tuple<mutation, stats::part_type_set> transform(const mutation& m, api::timestamp_type ts, bytes tuuid, int& batch_no) {
         auto stream_id = _ctx._cdc_metadata.get_stream(ts, m.token());
         mutation res(_log_schema, stream_id.to_partition_key(*_log_schema));
-        // const auto preimage = _schema->cdc_options().preimage();
-        // const auto postimage = _schema->cdc_options().postimage();
-        const bool preimage = false;
-        const bool postimage = false;
         stats::part_type_set touched_parts;
         auto& p = m.partition();
         if (p.partition_tombstone()) {
@@ -1039,7 +1035,7 @@ public:
             }
         } else {
             // should be insert, update or deletion
-            auto process_cells = [&](const row& r, column_kind ckind, const clustering_key& log_ck, const clustering_key* base_ck, std::optional<clustering_key> pikey, const cql3::untyped_result_set_row* pirow, std::optional<clustering_key> poikey) -> std::optional<gc_clock::duration> {
+            auto process_cells = [&](const row& r, column_kind ckind, const clustering_key& log_ck, const clustering_key* base_ck) -> std::optional<gc_clock::duration> {
                 std::optional<gc_clock::duration> ttl;
                 std::unordered_set<column_id> columns_assigned;
                 r.for_each_cell([&](column_id id, const atomic_cell_or_collection& cell) {
@@ -1168,19 +1164,10 @@ public:
                         }
                     }
 
-                    bytes_opt prev = get_current_col_value(base_ck, cdef, pirow);
-
-                    if (prev && pikey) {
-                        assert(std::addressof(res.partition().clustered_row(*_log_schema, *pikey)) != std::addressof(res.partition().clustered_row(*_log_schema, log_ck)));
-                        assert(pikey->explode() != log_ck.explode());
-                        res.set_cell(*pikey, *dst, atomic_cell::make_live(*dst->type, ts, *prev, _cdc_ttl_opt));
-                    }
+                    bytes_opt prev = get_current_col_value(base_ck, cdef);
 
                     if (is_column_delete) {
                         res.set_cell(log_ck, log_data_column_deleted_name_bytes(cdef.name()), data_value(true), ts, _cdc_ttl_opt);
-                        if (!cdef.is_atomic()) {
-                            _non_atomic_column_deletes.insert(&cdef);
-                        }
                         // don't merge with pre-image iff column delete
                         prev = std::nullopt;
                     }
@@ -1190,62 +1177,24 @@ public:
                     }
 
                     bytes_opt next;
-                    // if (poikey) {
-                        // keep track of actually assigning this already
-                        // columns_assigned.emplace(id);
-                        if (cdef.is_atomic() && !is_column_delete && value) {
-                            next = std::move(value);
-                            // res.set_cell(*poikey, *dst, atomic_cell::make_live(*dst->type, ts, *value, _cdc_ttl_opt));
-                        } else if (!cdef.is_atomic() && (value || (deleted_elements && prev))) {
-                            next = visit(*cdef.type, [&] (const auto& type) -> bytes {
-                                return merge(type, prev, value, deleted_elements);
-                            });
-                            // res.set_cell(*poikey, *dst, atomic_cell::make_live(*dst->type, ts, v, _cdc_ttl_opt));
-                        }
-                    // }
+                    if (cdef.is_atomic() && !is_column_delete && value) {
+                        next = std::move(value);
+                    } else if (!cdef.is_atomic() && (value || (deleted_elements && prev))) {
+                        next = visit(*cdef.type, [&] (const auto& type) -> bytes {
+                            return merge(type, prev, value, deleted_elements);
+                        });
+                    }
                     set_current_col_value(base_ck, cdef, std::move(next));
                 });
-
-                // fill in all columns not already processed. Note that column nulls are also marked.
-                if (poikey && pirow) {
-                    for (auto& cdef : _schema->columns(ckind)) {
-                        if (!columns_assigned.count(cdef.id)) {
-                            auto v = get_preimage_col_value(cdef, pirow);
-                            if (v) {
-                                auto dst = _log_schema->get_column_definition(log_data_column_name_bytes(cdef.name()));
-                                res.set_cell(*poikey, *dst, atomic_cell::make_live(*dst->type, ts, *v, _cdc_ttl_opt));
-                            }
-                        }
-                    }
-                }
 
                 return ttl;
             };
 
             if (!p.static_row().empty()) {
                 touched_parts.set<stats::part_type::STATIC_ROW>();
-                std::optional<clustering_key> pikey, poikey;
-                const cql3::untyped_result_set_row * pirow = nullptr;
-
-                if (rs && !rs->empty()) {
-                    // For static rows, only one row from the result set is needed
-                    pirow = &rs->front();
-                }
-
-                if (preimage) {
-                    pikey = set_pk_columns(m.key(), ts, tuuid, batch_no++, res);
-                    set_operation(*pikey, ts, operation::pre_image, res);
-                }
 
                 auto log_ck = set_pk_columns(m.key(), ts, tuuid, batch_no++, res);
-
-                if (postimage) {
-                     poikey = set_pk_columns(m.key(), ts, tuuid, batch_no++, res);
-                     set_operation(*poikey, ts, operation::post_image, res);
-                }
-
-                auto ttl = process_cells(p.static_row().get(), column_kind::static_column, log_ck, nullptr, pikey, pirow, poikey);
-
+                auto ttl = process_cells(p.static_row().get(), column_kind::static_column, log_ck, nullptr);
                 set_operation(log_ck, ts, operation::update, res);
 
                 if (ttl) {
@@ -1256,51 +1205,13 @@ public:
                 for (const rows_entry& r : p.clustered_rows()) {
                     auto ck_value = r.key().explode(*_schema);
 
-                    std::optional<clustering_key> pikey, poikey;
-                    const cql3::untyped_result_set_row * pirow = nullptr;
-
-                    if (rs) {
-                        for (auto& utr : *rs) {
-                            bool match = true;
-                            for (auto& c : _schema->clustering_key_columns()) {
-                                auto rv = utr.get_view(c.name_as_text());
-                                auto cv = r.key().get_component(*_schema, c.component_index());
-                                if (rv != cv) {
-                                    match = false;
-                                    break;
-                                }
-                            }
-                            if (match) {
-                                pirow = &utr;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (preimage) {
-                        pikey = set_pk_columns(m.key(), ts, tuuid, batch_no++, res);
-                        set_operation(*pikey, ts, operation::pre_image, res);
-                    }
-
                     auto log_ck = set_pk_columns(m.key(), ts, tuuid, batch_no++, res);
-
-                    if (postimage) {
-                        poikey = set_pk_columns(m.key(), ts, tuuid, batch_no++, res);
-                        set_operation(*poikey, ts, operation::post_image, res);
-                    }
 
                     size_t pos = 0;
                     for (const auto& column : _schema->clustering_key_columns()) {
                         assert (pos < ck_value.size());
                         auto cdef = _log_schema->get_column_definition(log_data_column_name_bytes(column.name()));
                         res.set_cell(log_ck, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos]), _cdc_ttl_opt));
-
-                        if (pikey) {
-                            res.set_cell(*pikey, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos]), _cdc_ttl_opt));
-                        }
-                        if (poikey) {
-                            res.set_cell(*poikey, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos]), _cdc_ttl_opt));
-                        }
 
                         ++pos;
                     }
@@ -1309,19 +1220,8 @@ public:
                     if (r.row().deleted_at()) {
                         touched_parts.set<stats::part_type::ROW_DELETE>();
                         cdc_op = operation::row_delete;
-                        if (pirow && pikey) {
-                            for (const column_definition& column: _schema->regular_columns()) {
-                                if (!pirow->has(column.name_as_text())) {
-                                    continue;
-                                }
-
-                                auto& cdef = *_log_schema->get_column_definition(log_data_column_name_bytes(column.name()));
-                                auto value = get_preimage_col_value(column, pirow);                                
-                                res.set_cell(*pikey, cdef, atomic_cell::make_live(*column.type, ts, bytes_view(*value), _cdc_ttl_opt));
-                            }
-                        }
                     } else {
-                        auto ttl = process_cells(r.row().cells(), column_kind::regular_column, log_ck, &r.key(), pikey, pirow, poikey);
+                        auto ttl = process_cells(r.row().cells(), column_kind::regular_column, log_ck, &r.key());
                         const auto& marker = r.row().marker();
                         if (marker.is_live() && marker.is_expiring()) {
                             ttl = marker.ttl();
@@ -1352,31 +1252,72 @@ public:
         }
     }
 
-    bytes_opt get_current_col_value(const clustering_key* ck, const column_definition& cdef, const cql3::untyped_result_set_row *pirow) {
+    bytes_opt get_current_col_value(const clustering_key* ck, const column_definition& cdef) {
         if (!ck) {
             // static row case
+            cdc_log.info("Trying to get current value for static row, column {}", cdef);
             if (auto it = _static_row_state.find(&cdef); it != _static_row_state.end()) {
+                cdc_log.info("Got it!");
                 return it->second;
             }
         } else {
             // clustered row case
+            cdc_log.info("Trying to get current value for ck {}, column {}", *ck, cdef);
             if (auto it = _clustering_row_states.find(*ck); it != _clustering_row_states.end()) {
+                cdc_log.info("Row is present!");
                 const auto& state = it->second;
                 if (auto it = state.find(&cdef); it != state.end()) {
+                    cdc_log.info("Got it!");
                     return it->second;
                 }
             }
         }
 
-        // cell was not updated while processing deltas, so look it up in preimage query results
-        return get_preimage_col_value(cdef, pirow);
+        cdc_log.info("Nope, got nothing");
+        return std::nullopt;
+    }
+
+    // Note: this assumes that the results are from one partition only
+    void load_preimage_results_into_state(lw_shared_ptr<cql3::untyped_result_set> preimage_set) {
+        // clustering rows
+        for (const auto& row : *preimage_set) {
+            // Construct the clustering key for this row
+            std::vector<bytes> ck_parts;
+            ck_parts.reserve(_schema->clustering_key_size());
+            for (auto& c : _schema->clustering_key_columns()) {
+                cdc_log.info("Viewed data: {}", to_hex(row.get_view(c.name_as_text())));
+                ck_parts.emplace_back(row.get_view(c.name_as_text()));
+            }
+            auto ck = clustering_key::from_exploded(std::move(ck_parts));
+
+            cdc_log.info("We have a CK: {}", ck);
+
+            // Collect regular rows
+            cell_map cells;
+            for (auto& c : _schema->regular_columns()) {
+                if (auto maybe_cell_view = get_preimage_col_value(c, &row)) {
+                    cells[&c] = *maybe_cell_view;
+                    cdc_log.info("Inserting cell for CK {}: {}", ck, *maybe_cell_view);
+                }
+            }
+
+            _clustering_row_states.insert_or_assign(std::move(ck), std::move(cells));
+        }
+
+        // static row
+        if (!preimage_set->empty()) {
+            // There may be some static row data
+            const auto& row = preimage_set->front();
+            for (auto& c : _schema->static_columns()) {
+                if (auto maybe_cell_view = get_preimage_col_value(c, &row)) {
+                    _static_row_state[&c] = *maybe_cell_view;
+                }
+            }
+        }
     }
 
     bytes_opt get_preimage_col_value(const column_definition& cdef, const cql3::untyped_result_set_row *pirow) {
-        /**
-         * #6070 - see comment for _non_atomic_column_deletes
-         */
-        if (!pirow || !pirow->has(cdef.name_as_text()) || _non_atomic_column_deletes.count(&cdef)) {
+        if (!pirow || !pirow->has(cdef.name_as_text())) {
             return std::nullopt;
         }
         return cdef.is_atomic()
@@ -1580,6 +1521,10 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
             }
 
             return f.then([trans = std::move(trans), &mutations, idx, tr_state, &details] (lw_shared_ptr<cql3::untyped_result_set> rs) mutable {
+                if (rs) {
+                    trans.load_preimage_results_into_state(std::move(rs));
+                }
+
                 auto& m = mutations[idx];
                 auto& s = m.schema();
                 details.had_preimage |= s->cdc_options().preimage();
@@ -1594,19 +1539,19 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                     std::optional<preimage_processing_func> preimage_f;
                     if (s->cdc_options().preimage()) {
                         preimage_f = [&] (const dht::decorated_key& dk, const clustering_key* ck, std::optional<cells_set> affected_cells, api::timestamp_type ts, bytes tuuid, int& batch_no) {
-                            mutations.push_back(trans.generate_image(dk, operation::pre_image, ck, affected_cells, ts, tuuid, batch_no, nullptr /* TODO */));
+                            mutations.push_back(trans.generate_image(dk, operation::pre_image, ck, affected_cells, ts, tuuid, batch_no));
                         };
                     }
 
                     std::optional<postimage_processing_func> postimage_f;
                     if (s->cdc_options().postimage()) {
                         postimage_f = [&] (const dht::decorated_key& dk, const clustering_key* ck, std::optional<cells_set> affected_cells, api::timestamp_type ts, bytes tuuid, int& batch_no) {
-                            mutations.push_back(trans.generate_image(dk, operation::post_image, ck, affected_cells, ts, tuuid, batch_no, nullptr /* TODO */));
+                            mutations.push_back(trans.generate_image(dk, operation::post_image, ck, affected_cells, ts, tuuid, batch_no));
                         };
                     }
 
                     auto delta_f = [&] (mutation mm, api::timestamp_type ts, bytes tuuid, int& batch_no) {
-                        auto [mut, parts] = trans.transform(std::move(mm), rs.get(), ts, tuuid, batch_no);
+                        auto [mut, parts] = trans.transform(std::move(mm), ts, tuuid, batch_no);
                         mutations.push_back(std::move(mut));
                         ++generated_count;
                         details.touched_parts.add(parts);
@@ -1618,7 +1563,7 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                     int batch_no = 0;
                     auto ts = find_timestamp(*s, m);
                     auto tuuid = timeuuid_type->decompose(generate_timeuuid(ts));
-                    auto [mut, parts] = trans.transform(m, rs.get(), ts, tuuid, batch_no);
+                    auto [mut, parts] = trans.transform(m, ts, tuuid, batch_no);
                     mutations.push_back(std::move(mut));
                     generated_count = 1;
                     details.touched_parts.add(parts);
