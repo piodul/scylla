@@ -458,32 +458,30 @@ bool should_split(const mutation& base_mutation, const schema& base_schema) {
     return found_ts == api::missing_timestamp;
 }
 
-void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema,
-        std::optional<preimage_processing_func> preimage_f,
-        std::optional<postimage_processing_func> postimage_f,
-        delta_processing_func delta_f) {
+void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
+        bool enable_preimage, bool enable_postimage) {
     auto changes = extract_changes(base_mutation, *base_schema);
-    auto dk = base_mutation.decorated_key();
-    auto pk = dk.key();
+    auto pk = base_mutation.key();
 
     for (auto& [change_ts, btch] : changes) {
         auto tuuid = timeuuid_type->decompose(generate_timeuuid(change_ts));
-        int batch_no = 0;
+
+        processor.begin_timestamp(change_ts, tuuid);
 
         clustered_cells_set affected_clustered_cells{clustering_key::less_compare(*base_schema)};
         cells_set affected_static_cells;
 
-        if (preimage_f || postimage_f) {
+        if (enable_preimage || enable_postimage) {
             affected_clustered_cells = btch.get_affected_clustered_cells(*base_mutation.schema());
             affected_static_cells = btch.get_affected_static_cells();
         }
 
-        if (preimage_f) {
-            for (const auto& [ck, crow] : affected_clustered_cells) {
-                (*preimage_f)(dk, &ck, crow, change_ts, tuuid, batch_no);
+        if (enable_preimage) {
+            for (const auto& [ck, affected_row_cells] : affected_clustered_cells) {
+                processor.produce_preimage(&ck, affected_row_cells);
             }
             if (!affected_static_cells.empty()) {
-                (*preimage_f)(dk, nullptr, affected_static_cells, change_ts, tuuid, batch_no);
+                processor.produce_preimage(nullptr, affected_static_cells);
             }
         }
 
@@ -497,7 +495,7 @@ void for_each_change(const mutation& base_mutation, const schema_ptr& base_schem
                 auto& cdef = base_schema->column_at(column_kind::static_column, nonatomic_update.id);
                 m.set_static_cell(cdef, collection_mutation_description{nonatomic_update.t, std::move(nonatomic_update.cells)}.serialize(*cdef.type));
             }
-            delta_f(std::move(m), change_ts, tuuid, batch_no);
+            processor.process_delta(std::move(m));
         }
 
         for (auto& cr_insert : btch.clustered_inserts) {
@@ -514,7 +512,7 @@ void for_each_change(const mutation& base_mutation, const schema_ptr& base_schem
             }
             row.apply(cr_insert.marker);
 
-            delta_f(std::move(m), change_ts, tuuid, batch_no);
+            processor.process_delta(std::move(m));
         }
 
         for (auto& cr_update : btch.clustered_updates) {
@@ -530,36 +528,79 @@ void for_each_change(const mutation& base_mutation, const schema_ptr& base_schem
                 row.apply(cdef, collection_mutation_description{nonatomic_update.t, std::move(nonatomic_update.cells)}.serialize(*cdef.type));
             }
 
-            delta_f(std::move(m), change_ts, tuuid, batch_no);
+            processor.process_delta(std::move(m));
         }
 
         for (auto& cr_delete : btch.clustered_row_deletions) {
             mutation m(base_schema, pk);
             m.partition().apply_delete(*base_schema, cr_delete.key, cr_delete.t);
-            delta_f(std::move(m), change_ts, tuuid, batch_no);
+            processor.process_delta(std::move(m));
         }
 
         for (auto& crange_delete : btch.clustered_range_deletions) {
             mutation m(base_schema, pk);
             m.partition().apply_delete(*base_schema, crange_delete.rt);
-            delta_f(std::move(m), change_ts, tuuid, batch_no);
+            processor.process_delta(std::move(m));
         }
 
         if (btch.partition_deletions) {
             mutation m(base_schema, pk);
             m.partition().apply(btch.partition_deletions->t);
-            delta_f(std::move(m), change_ts, tuuid, batch_no);
+            processor.process_delta(std::move(m));
         }
 
-        if (postimage_f) {
+        if (enable_postimage) {
             for (const auto& [ck, crow] : affected_clustered_cells) {
-                (*postimage_f)(dk, &ck, std::nullopt, change_ts, tuuid, batch_no);
+                processor.produce_postimage(&ck);
             }
             if (!affected_static_cells.empty()) {
-                (*postimage_f)(dk, nullptr, std::nullopt, change_ts, tuuid, batch_no);
+                processor.produce_postimage(nullptr);
             }
         }
+
+        processor.end_timestamp();
     }
+}
+
+// TODO: Move it here?
+extern api::timestamp_type find_timestamp(const schema& s, const mutation& m);
+
+void process_changes_without_splitting(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
+        bool enable_preimage, bool enable_postimage) {
+    auto change_ts = find_timestamp(*base_schema, base_mutation);
+    auto tuuid = timeuuid_type->decompose(generate_timeuuid(change_ts));
+
+    processor.begin_timestamp(change_ts, tuuid);
+
+    clustered_cells_set affected_clustered_cells{clustering_key::less_compare(*base_schema)};
+    cells_set affected_static_cells;
+
+    if (enable_preimage || enable_postimage) {
+        // TODO
+        // for (const rows_entry& cr : p.clustered_rows()) {
+    }
+
+    if (enable_preimage) {
+        for (const auto& [ck, affected_row_cells] : affected_clustered_cells) {
+            processor.produce_preimage(&ck, affected_row_cells);
+        }
+        if (!affected_static_cells.empty()) {
+            processor.produce_preimage(nullptr, affected_static_cells);
+        }
+    }
+
+    processor.process_delta(base_mutation);
+
+    if (enable_postimage) {
+        for (const auto& [ck, crow] : affected_clustered_cells) {
+            processor.produce_postimage(&ck);
+        }
+        if (!affected_static_cells.empty()) {
+            processor.produce_postimage(nullptr);
+        }
+    }
+
+    processor.end_timestamp();
 }
 
 } // namespace cdc

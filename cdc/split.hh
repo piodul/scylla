@@ -34,14 +34,28 @@ namespace cdc {
 
 using cells_set = std::unordered_set<column_id>;
 
-using preimage_processing_func = seastar::noncopyable_function<void(const dht::decorated_key&, const clustering_key*, std::optional<cells_set>, api::timestamp_type, bytes, int&)>;
-using postimage_processing_func = seastar::noncopyable_function<void(const dht::decorated_key&, const clustering_key*, std::optional<cells_set>, api::timestamp_type, bytes, int&)>;
-using delta_processing_func = seastar::noncopyable_function<void(mutation, api::timestamp_type, bytes, int&)>;
+// using preimage_processing_func = seastar::noncopyable_function<void(const dht::decorated_key&, const clustering_key*, std::optional<cells_set>, api::timestamp_type, bytes, int&)>;
+// using postimage_processing_func = seastar::noncopyable_function<void(const dht::decorated_key&, const clustering_key*, std::optional<cells_set>, api::timestamp_type, bytes, int&)>;
+// using delta_processing_func = seastar::noncopyable_function<void(mutation, api::timestamp_type, bytes, int&)>;
+
+class change_processor {
+public:
+    virtual ~change_processor() {};
+
+    virtual void begin_timestamp(api::timestamp_type ts, bytes tuuid) = 0;
+    virtual void end_timestamp() = 0;
+
+    // ck is null if static row pre/postimage is requested
+    virtual void produce_preimage(const clustering_key* ck, const cells_set& cells_to_include) = 0;
+    virtual void process_delta(mutation m) = 0;
+    virtual void produce_postimage(const clustering_key* ck) = 0;
+};
 
 bool should_split(const mutation& base_mutation, const schema& base_schema);
-void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema,
-        std::optional<preimage_processing_func> preimage_f,
-        std::optional<postimage_processing_func> postimage_f,
-        delta_processing_func delta_f);
+void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
+        bool enable_preimage, bool enable_postimage);
+
+void process_changes_without_splitting(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
+        bool enable_preimage, bool enable_postimage);
 
 }
