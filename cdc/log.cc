@@ -823,7 +823,7 @@ private:
      * To handle this we use the fact that
      * 1. changes without a TTL are treated as if TTL = 0,
      * 2. `transform` is invoked in order of increasing TTLs,
-     * and we maintain state between `transform` invocations (`_non_atomic_column_deletes`).
+     * and we maintain state between `transform` invocations (`_clustering_row_states`, `_static_row_state`).
      *
      * Thus, the tombstone call will happen *before* the cell addition call,
      * so the cell addition call will know that there previously was a tombstone
@@ -834,7 +834,6 @@ private:
      * which modifies a collection column as above, the row marker call will happen first;
      * its post-image will still show {1:1} for the collection column. Good.
      */
-    // TODO: Fix the comment above?
 
     using cell_map = std::unordered_map<const column_definition*, bytes_opt>;
     std::unordered_map<clustering_key, cell_map, clustering_key::hashing, clustering_key::equality> _clustering_row_states;
