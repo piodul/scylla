@@ -839,6 +839,7 @@ private:
     stats::part_type_set _touched_parts;
 
     std::vector<mutation> _result_mutations;
+    int _batch_no = -1;
     api::timestamp_type _ts;
     bytes _tuuid;
     lw_shared_ptr<cql3::untyped_result_set> _preimage_select_result;
@@ -847,10 +848,10 @@ private:
         return _result_mutations.back();
     }
 
-    clustering_key set_pk_columns(int batch_no) {
+    clustering_key set_pk_columns() {
         auto& m = current_mutation();
         const auto log_ck = clustering_key::from_exploded(
-                *m.schema(), { _tuuid, int32_type->decompose(batch_no) });
+                *m.schema(), { _tuuid, int32_type->decompose(_batch_no++) });
         auto pk_value = _dk.key().explode(*_schema);
         size_t pos = 0;
         for (const auto& column : _schema->partition_key_columns()) {
@@ -952,13 +953,14 @@ public:
     void begin_timestamp(api::timestamp_type ts) override {
         const auto stream_id = _ctx._cdc_metadata.get_stream(ts, _dk.token());
         _result_mutations.emplace_back(_log_schema, stream_id.to_partition_key(*_log_schema));
+        _batch_no = 0;
         _ts = ts;
         _tuuid = timeuuid_type->decompose(generate_timeuuid(ts));
     }
 
     // TODO: is pre-image data based on query enough. We only have actual column data. Do we need
     // more details like tombstones/ttl? Probably not but keep in mind.
-    void process_change(const mutation& m, int& batch_no) override {
+    void process_change(const mutation& m) override {
         mutation& res = current_mutation();
         const auto rs = _preimage_select_result.get();
         const auto preimage = _schema->cdc_options().preimage();
@@ -967,7 +969,7 @@ public:
         if (p.partition_tombstone()) {
             // Partition deletion
             _touched_parts.set<stats::part_type::PARTITION_DELETE>();
-            auto log_ck = set_pk_columns(batch_no++);
+            auto log_ck = set_pk_columns();
             set_operation(log_ck, operation::partition_delete);
         } else if (!p.row_tombstones().empty()) {
             // range deletion
@@ -990,7 +992,7 @@ public:
                     }
                 };
                 {
-                    auto log_ck = set_pk_columns(batch_no++);
+                    auto log_ck = set_pk_columns();
                     set_bound(log_ck, rt.start);
                     const auto start_operation = rt.start_kind == bound_kind::incl_start
                             ? operation::range_delete_start_inclusive
@@ -998,7 +1000,7 @@ public:
                     set_operation(log_ck, start_operation);
                 }
                 {
-                    auto log_ck = set_pk_columns(batch_no++);
+                    auto log_ck = set_pk_columns();
                     set_bound(log_ck, rt.end);
                     const auto end_operation = rt.end_kind == bound_kind::incl_end
                             ? operation::range_delete_end_inclusive
@@ -1199,14 +1201,14 @@ public:
                 }
 
                 if (preimage) {
-                    pikey = set_pk_columns(batch_no++);
+                    pikey = set_pk_columns();
                     set_operation(*pikey, operation::pre_image);
                 }
 
-                auto log_ck = set_pk_columns(batch_no++);
+                auto log_ck = set_pk_columns();
 
                 if (postimage) {
-                     poikey = set_pk_columns(batch_no++);
+                     poikey = set_pk_columns();
                      set_operation(*poikey, operation::post_image);
                 }
 
@@ -1244,14 +1246,14 @@ public:
                     }
 
                     if (preimage) {
-                        pikey = set_pk_columns(batch_no++);
+                        pikey = set_pk_columns();
                         set_operation(*pikey, operation::pre_image);
                     }
 
-                    auto log_ck = set_pk_columns(batch_no++);
+                    auto log_ck = set_pk_columns();
 
                     if (postimage) {
-                        poikey = set_pk_columns(batch_no++);
+                        poikey = set_pk_columns();
                         set_operation(*poikey, operation::post_image);
                     }
 
