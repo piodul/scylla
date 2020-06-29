@@ -37,7 +37,7 @@ public:
 
     virtual void begin_timestamp(api::timestamp_type ts) = 0;
 
-    virtual void process_change(const mutation& m, int& batch_no) = 0;
+    virtual void process_change(const mutation& m) = 0;
 };
 
 bool should_split(const mutation& base_mutation);
