@@ -1598,11 +1598,10 @@ SEASTAR_THREAD_TEST_CASE(test_batch_with_row_delete) {
             // Update (0)
             {int32_t(1), make_user_value(udt_type, {1,2}), make_map_value(m_type, {{1,2},{3,4}}), make_set_value(s_type, {1,2,3}), oper_ut(cdc::operation::insert)},
             // Preimage for (1)
-            {int32_t(1), udt_null, map_null, set_null, oper_ut(cdc::operation::pre_image)},
+            {int32_t(1), make_user_value(udt_type, {1,2}), make_map_value(m_type, {{1,2},{3,4}}), make_set_value(s_type, {1,2,3}), oper_ut(cdc::operation::pre_image)},
             // Update (1)
             {int32_t(666), udt_null, map_null, set_null, oper_ut(cdc::operation::update)},
-            // Preimage for (1) + (2)
-            {int32_t(1), make_user_value(udt_type, {1,2}), make_map_value(m_type, {{1,2},{3,4}}), make_set_value(s_type, {1,2,3}), oper_ut(cdc::operation::pre_image)},
+            // No preimage for (1) + (2), because it is in the same group
             // Row delete (2)
             {int_null, udt_null, map_null, set_null, oper_ut(cdc::operation::row_delete)},
         };
@@ -1616,7 +1615,7 @@ SEASTAR_THREAD_TEST_CASE(test_batch_with_row_delete) {
 
         for (size_t idx = 0; idx < expected.size(); ++idx) {
             const auto& er = expected[idx];
-            const auto& r = results[idx]; // We skip first log record because it represents initial insert.
+            const auto& r = results[idx];
             BOOST_REQUIRE_EQUAL(deser(int32_type, r[0]), er[0]);
             BOOST_REQUIRE_EQUAL(deser(udt_type, r[1]), er[1]);
             BOOST_REQUIRE_EQUAL(deser(m_type, r[2]), er[2]);

@@ -70,7 +70,9 @@ struct partition_deletion {
     tombstone t;
 };
 
-using clustered_cells_set = std::map<clustering_key, cdc::cells_set, clustering_key::less_compare>;
+using clustered_columns_set = std::map<clustering_key, cdc::columns_set, clustering_key::less_compare>;
+
+extern logging::logger cdc_log;
 
 struct batch {
     std::vector<static_row_update> static_updates;
@@ -80,8 +82,19 @@ struct batch {
     std::vector<clustered_range_deletion> clustered_range_deletions;
     std::optional<partition_deletion> partition_deletions;
 
-    clustered_cells_set get_affected_clustered_cells(const schema& s) const {
-        clustered_cells_set ret{clustering_key::less_compare(s)};
+    clustered_columns_set get_affected_clustered_columns_per_row(const schema& s) const {
+        clustered_columns_set ret{clustering_key::less_compare(s)};
+
+        if (!clustered_row_deletions.empty()) {
+            // When deleting a row, all columns are affected
+            cdc::columns_set all_columns;
+            for (const auto& column : s.regular_columns()) {
+                all_columns.insert(column.id);
+            }
+            for (const auto& change : clustered_row_deletions) {
+                ret.insert(std::make_pair(change.key, all_columns));
+            }
+        }
 
         auto process_change_type = [&] (const auto& changes) {
             for (const auto& change : changes) {
@@ -101,8 +114,8 @@ struct batch {
         return ret;
     }
 
-    cdc::cells_set get_affected_static_cells() const {
-        cdc::cells_set ret;
+    cdc::columns_set get_affected_static_columns() const {
+        cdc::columns_set ret;
 
         for (const auto& change : static_updates) {
             for (const auto& entry : change.atomic_entries) {
@@ -171,14 +184,10 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
     set_of_changes res;
     auto& p = base_mutation.partition();
 
-    auto batch_at = [&] (api::timestamp_type ts) -> batch& {
-        return res.try_emplace(ts).first->second;
-    };
-
     auto sr_updates = extract_row_updates(p.static_row().get(), column_kind::static_column, base_schema);
     for (auto& [k, up]: sr_updates) {
         auto [timestamp, ttl] = k;
-        batch_at(timestamp).static_updates.push_back({
+        res[timestamp].static_updates.push_back({
                 ttl,
                 std::move(up.atomic_entries),
                 std::move(up.nonatomic_entries)
@@ -209,10 +218,9 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
             // in increasing TTL order. The reason is explained in a comment in cdc/log.cc,
             // search for "#6070".
             auto [timestamp, ttl] = k;
-            auto& batch = batch_at(timestamp);
 
             if (is_insert(timestamp, ttl)) {
-                batch.clustered_inserts.push_back({
+                res[timestamp].clustered_inserts.push_back({
                         ttl,
                         cr.key(),
                         marker,
@@ -220,7 +228,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                         {}
                     });
 
-                auto& cr_insert = batch.clustered_inserts.back();
+                auto& cr_insert = res[timestamp].clustered_inserts.back();
                 bool clustered_update_exists = false;
                 for (auto& nonatomic_up: up.nonatomic_entries) {
                     // Updating a collection column with an INSERT statement implies inserting a tombstone.
@@ -248,7 +256,7 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                         cr_insert.nonatomic_entries.push_back(std::move(nonatomic_up));
                     } else {
                         if (!clustered_update_exists) {
-                            batch.clustered_updates.push_back({
+                            res[timestamp].clustered_updates.push_back({
                                 ttl,
                                 cr.key(),
                                 {},
@@ -271,12 +279,12 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
                             clustered_update_exists = true;
                         }
 
-                        auto& cr_update = batch.clustered_updates.back();
+                        auto& cr_update = res[timestamp].clustered_updates.back();
                         cr_update.nonatomic_entries.push_back(std::move(nonatomic_up));
                     }
                 }
             } else {
-                batch.clustered_updates.push_back({
+                res[timestamp].clustered_updates.push_back({
                         ttl,
                         cr.key(),
                         std::move(up.atomic_entries),
@@ -287,19 +295,19 @@ set_of_changes extract_changes(const mutation& base_mutation, const schema& base
 
         auto row_tomb = cr.row().deleted_at().regular();
         if (row_tomb) {
-            batch_at(row_tomb.timestamp).clustered_row_deletions.push_back({cr.key(), row_tomb});
+            res[row_tomb.timestamp].clustered_row_deletions.push_back({cr.key(), row_tomb});
         }
     }
 
     for (const auto& rt: p.row_tombstones()) {
         if (rt.tomb.timestamp != api::missing_timestamp) {
-            batch_at(rt.tomb.timestamp).clustered_range_deletions.push_back({rt});
+            res[rt.tomb.timestamp].clustered_range_deletions.push_back({rt});
         }
     }
 
     auto partition_tomb_timestamp = p.partition_tombstone().timestamp;
     if (partition_tomb_timestamp != api::missing_timestamp) {
-        batch_at(partition_tomb_timestamp).partition_deletions = {p.partition_tombstone()};
+        res[partition_tomb_timestamp].partition_deletions = {p.partition_tombstone()};
     }
 
     return res;
@@ -458,30 +466,28 @@ bool should_split(const mutation& base_mutation, const schema& base_schema) {
     return found_ts == api::missing_timestamp;
 }
 
-void for_each_change(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
+void process_changes_with_splitting(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
         bool enable_preimage, bool enable_postimage) {
     auto changes = extract_changes(base_mutation, *base_schema);
     auto pk = base_mutation.key();
 
     for (auto& [change_ts, btch] : changes) {
-        auto tuuid = timeuuid_type->decompose(generate_timeuuid(change_ts));
+        processor.begin_timestamp(change_ts);
 
-        processor.begin_timestamp(change_ts, tuuid);
-
-        clustered_cells_set affected_clustered_cells{clustering_key::less_compare(*base_schema)};
-        cells_set affected_static_cells;
+        clustered_columns_set affected_clustered_columns_per_row{clustering_key::less_compare(*base_schema)};
+        columns_set affected_static_columns;
 
         if (enable_preimage || enable_postimage) {
-            affected_clustered_cells = btch.get_affected_clustered_cells(*base_mutation.schema());
-            affected_static_cells = btch.get_affected_static_cells();
+            affected_static_columns = btch.get_affected_static_columns();
+            affected_clustered_columns_per_row = btch.get_affected_clustered_columns_per_row(*base_mutation.schema());
         }
 
         if (enable_preimage) {
-            for (const auto& [ck, affected_row_cells] : affected_clustered_cells) {
-                processor.produce_preimage(&ck, affected_row_cells);
+            if (!affected_static_columns.empty()) {
+                processor.produce_preimage(nullptr, affected_static_columns);
             }
-            if (!affected_static_cells.empty()) {
-                processor.produce_preimage(nullptr, affected_static_cells);
+            for (const auto& [ck, affected_row_cells] : affected_clustered_columns_per_row) {
+                processor.produce_preimage(&ck, affected_row_cells);
             }
         }
 
@@ -550,15 +556,13 @@ void for_each_change(const mutation& base_mutation, const schema_ptr& base_schem
         }
 
         if (enable_postimage) {
-            for (const auto& [ck, crow] : affected_clustered_cells) {
-                processor.produce_postimage(&ck);
-            }
-            if (!affected_static_cells.empty()) {
+            if (!affected_static_columns.empty()) {
                 processor.produce_postimage(nullptr);
             }
+            for (const auto& [ck, crow] : affected_clustered_columns_per_row) {
+                processor.produce_postimage(&ck);
+            }
         }
-
-        processor.end_timestamp();
     }
 }
 
@@ -568,39 +572,46 @@ extern api::timestamp_type find_timestamp(const schema& s, const mutation& m);
 void process_changes_without_splitting(const mutation& base_mutation, const schema_ptr& base_schema, change_processor& processor,
         bool enable_preimage, bool enable_postimage) {
     auto change_ts = find_timestamp(*base_schema, base_mutation);
-    auto tuuid = timeuuid_type->decompose(generate_timeuuid(change_ts));
-
-    processor.begin_timestamp(change_ts, tuuid);
-
-    clustered_cells_set affected_clustered_cells{clustering_key::less_compare(*base_schema)};
-    cells_set affected_static_cells;
-
-    if (enable_preimage || enable_postimage) {
-        // TODO
-        // for (const rows_entry& cr : p.clustered_rows()) {
-    }
+    processor.begin_timestamp(change_ts);
 
     if (enable_preimage) {
-        for (const auto& [ck, affected_row_cells] : affected_clustered_cells) {
-            processor.produce_preimage(&ck, affected_row_cells);
+        const auto& p = base_mutation.partition();
+
+        columns_set columns;
+        if (!p.static_row().empty()) {
+            p.static_row().get().for_each_cell([&] (column_id id, const atomic_cell_or_collection& cell) {
+                columns.insert(id);
+            });
+            processor.produce_preimage(nullptr, columns);
         }
-        if (!affected_static_cells.empty()) {
-            processor.produce_preimage(nullptr, affected_static_cells);
+
+        for (const rows_entry& cr : p.clustered_rows()) {
+            columns.clear();
+            if (cr.row().deleted_at().regular()) {
+                // Row deleted - include all columns in preimage
+                for (const auto& column : base_schema->regular_columns()) {
+                    columns.insert(column.id);
+                }
+            } else {
+                cr.row().cells().for_each_cell([&] (column_id id, const atomic_cell_or_collection& cell) {
+                    columns.insert(id);
+                });
+            }
+            processor.produce_preimage(&cr.key(), columns);
         }
     }
 
     processor.process_delta(base_mutation);
 
     if (enable_postimage) {
-        for (const auto& [ck, crow] : affected_clustered_cells) {
-            processor.produce_postimage(&ck);
-        }
-        if (!affected_static_cells.empty()) {
+        const auto& p = base_mutation.partition();
+        if (!p.static_row().empty()) {
             processor.produce_postimage(nullptr);
         }
+        for (const rows_entry& cr : p.clustered_rows()) {
+            processor.produce_postimage(&cr.key());
+        }
     }
-
-    processor.end_timestamp();
 }
 
 } // namespace cdc
