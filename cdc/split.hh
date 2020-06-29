@@ -35,7 +35,7 @@ class change_processor {
 public:
     virtual ~change_processor() {};
 
-    virtual void begin_timestamp(api::timestamp_type ts, bytes tuuid) = 0;
+    virtual void begin_timestamp(api::timestamp_type ts) = 0;
 
     virtual void process_change(const mutation& m, int& batch_no) = 0;
 };
