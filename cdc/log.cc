@@ -1587,16 +1587,18 @@ cdc::cdc_service::impl::augment_mutation_call(lowres_clock::time_point timeout, 
                     trans.load_preimage_results_into_state(std::move(rs), static_only);
                 }
 
-                details.had_preimage |= s->cdc_options().preimage();
-                details.had_postimage |= s->cdc_options().postimage();
+                const bool preimage = s->cdc_options().preimage();
+                const bool postimage = s->cdc_options().postimage();
+                details.had_preimage |= preimage;
+                details.had_postimage |= postimage;
                 tracing::trace(tr_state, "CDC: Generating log mutations for {}", m.decorated_key());
                 if (should_split(m)) {
                     tracing::trace(tr_state, "CDC: Splitting {}", m.decorated_key());
                     details.was_split = true;
-                    process_changes_with_splitting(m, trans);
+                    process_changes_with_splitting(m, trans, preimage, postimage);
                 } else {
                     tracing::trace(tr_state, "CDC: No need to split {}", m.decorated_key());
-                    process_changes_without_splitting(m, trans);
+                    process_changes_without_splitting(m, trans, preimage, postimage);
                 }
                 auto log_mut = trans.take_generated_log_mutations();
                 const int generated_count = log_mut.size();

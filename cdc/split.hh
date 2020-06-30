@@ -48,7 +48,9 @@ public:
 };
 
 bool should_split(const mutation& base_mutation);
-void process_changes_with_splitting(const mutation& base_mutation, change_processor& processor);
-void process_changes_without_splitting(const mutation& base_mutation, change_processor& processor);
+void process_changes_with_splitting(const mutation& base_mutation, change_processor& processor,
+        bool enable_preimage, bool enable_postimage);
+void process_changes_without_splitting(const mutation& base_mutation, change_processor& processor,
+        bool enable_preimage, bool enable_postimage);
 
 }
