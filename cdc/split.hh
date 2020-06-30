@@ -38,7 +38,7 @@ class change_processor {
 public:
     virtual ~change_processor() {};
 
-    virtual void begin_timestamp(api::timestamp_type ts) = 0;
+    virtual void begin_timestamp(api::timestamp_type ts, bool is_last) = 0;
 
     // if ck is null, pre/postimage for static row is requested
     virtual void produce_preimage(const clustering_key* ck, const one_kind_column_set& columns_to_include) = 0;
