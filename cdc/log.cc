@@ -962,6 +962,14 @@ public:
         _tuuid = timeuuid_type->decompose(generate_timeuuid(ts));
     }
 
+    void produce_preimage(const clustering_key* ck, const one_kind_column_set& columns_to_include) override {
+        // TODO
+    };
+
+    void produce_postimage(const clustering_key* ck) override {
+        // TODO
+    }
+
     // TODO: is pre-image data based on query enough. We only have actual column data. Do we need
     // more details like tombstones/ttl? Probably not but keep in mind.
     void process_change(const mutation& m) override {
