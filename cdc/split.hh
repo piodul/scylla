@@ -49,7 +49,7 @@ public:
     // Tells the processor that changes that follow from now on will be of given timestamp.
     // begin_timestamp can be called only once for a given timestamp and change_processor object.
     //   ts - timestamp of mutation parts
-    virtual void begin_timestamp(api::timestamp_type ts) = 0;
+    virtual void begin_timestamp(api::timestamp_type ts, bool is_last) = 0;
 
     // Tells the processor to produce a preimage for a given clustering/static row.
     //   ck - clustering key of the row for which to produce a preimage; if nullptr, static row preimage is requested
