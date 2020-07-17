@@ -592,7 +592,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Time interval in milliseconds to reset all node scores, which allows a bad node to recover.")
     , dynamic_snitch_update_interval_in_ms(this, "dynamic_snitch_update_interval_in_ms", value_status::Unused, 100,
         "The time interval for how often the snitch calculates node scores. Because score calculation is CPU intensive, be careful when reducing this interval.")
-    , hinted_handoff_enabled(this, "hinted_handoff_enabled", value_status::Used, db::config::hinted_handoff_enabled_type(db::config::hinted_handoff_enabled_type::enabled_for_all_tag()),
+    , hinted_handoff_enabled(this, "hinted_handoff_enabled", liveness::LiveUpdate, value_status::Used, db::config::hinted_handoff_enabled_type(db::config::hinted_handoff_enabled_type::enabled_for_all_tag()),
         "Enable or disable hinted handoff. To enable per data center, add data center list. For example: hinted_handoff_enabled: DC1,DC2. A hint indicates that the write needs to be replayed to an unavailable node. "
         "Related information: About hinted handoff writes")
     , hinted_handoff_throttle_in_kb(this, "hinted_handoff_throttle_in_kb", value_status::Unused, 1024,

@@ -50,9 +50,24 @@ const std::string manager::FILENAME_PREFIX("HintsLog" + commitlog::descriptor::S
 const std::chrono::seconds manager::hint_file_write_timeout = std::chrono::seconds(2);
 const std::chrono::seconds manager::hints_flush_period = std::chrono::seconds(10);
 
+static fs::path get_hint_directory_for_current_shard(sstring hints_directory) {
+    return fs::path(hints_directory) / format("{:d}", this_shard_id());
+}
+
+manager::manager(sstring hints_directory, const utils::updateable_value<host_filter>& filter, int64_t max_hint_window_ms, resource_manager& res_manager, distributed<database>& db)
+    : _hints_dir(get_hint_directory_for_current_shard(std::move(hints_directory)))
+    , _host_filter(filter())
+    , _host_filter_change_observer(filter.observe(std::bind(&manager::on_host_filter_update, this, std::placeholders::_1)))
+    , _local_snitch_ptr(locator::i_endpoint_snitch::get_local_snitch_ptr())
+    , _max_hint_window_us(max_hint_window_ms * 1000)
+    , _local_db(db.local())
+    , _resource_manager(res_manager)
+{}
+
 manager::manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager& res_manager, distributed<database>& db)
-    : _hints_dir(fs::path(hints_directory) / format("{:d}", this_shard_id()))
-    , _host_filter(std::move(filter))
+    : _hints_dir(get_hint_directory_for_current_shard(std::move(hints_directory)))
+    , _host_filter(filter)
+    , _host_filter_change_observer(nullptr, {})
     , _local_snitch_ptr(locator::i_endpoint_snitch::get_local_snitch_ptr())
     , _max_hint_window_us(max_hint_window_ms * 1000)
     , _local_db(db.local())
@@ -281,6 +296,11 @@ manager::end_point_hints_manager& manager::get_ep_manager(ep_key_type ep) {
     if (it == ep_managers_end()) {
         manager_logger.trace("Creating an ep_manager for {}", ep);
         manager::end_point_hints_manager& ep_man = _ep_managers.emplace(ep, end_point_hints_manager(ep, *this)).first->second;
+        if (_host_filter.can_hint_for(_local_snitch_ptr, ep)) {
+            ep_man.allow_hints_by_host_filter();
+        } else {
+            ep_man.forbid_hints_by_host_filter();
+        }
         ep_man.start();
         return ep_man;
     }
@@ -1003,6 +1023,20 @@ void manager::update_backlog(size_t backlog, size_t max_backlog) {
         allow_hints();
     } else {
         forbid_hints_for_eps_with_pending_hints();
+    }
+}
+
+void manager::on_host_filter_update(const host_filter& filter) {
+    manager_logger.debug("updating host filtering configuration: {}", filter);
+
+    _host_filter = filter;
+
+    for (auto& [ep, mgr] : _ep_managers) {
+        if (filter.can_hint_for(_local_snitch_ptr, ep)) {
+            mgr.allow_hints_by_host_filter();
+        } else {
+            mgr.forbid_hints_by_host_filter();
+        }
     }
 }
 

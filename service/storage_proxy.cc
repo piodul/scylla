@@ -1789,7 +1789,7 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
     , _write_ack_smp_service_group(cfg.write_ack_smp_service_group)
     , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
     , _hints_resource_manager(cfg.available_memory / 10)
-    , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
+    , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), db::hints::host_filter(db::hints::host_filter::enabled_for_all_tag()), _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _stats_key(stats_key)
     , _features(feat)
     , _background_write_throttle_threahsold(cfg.available_memory / 10)
@@ -1802,11 +1802,11 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
                        sm::description("number of currently throttled write requests")),
     });
 
-    if (!cfg.hinted_handoff_enabled.is_disabled_for_all()) {
-        const db::config& dbcfg = _db.local().get_config();
+    const db::config& dbcfg = _db.local().get_config();
+    if (!dbcfg.hinted_handoff_enabled().is_disabled_for_all()) {
         supervisor::notify("creating hints manager");
-        slogger.trace("hinted DCs: {}", cfg.hinted_handoff_enabled);
-        _hints_manager.emplace(dbcfg.hints_directory(), cfg.hinted_handoff_enabled, dbcfg.max_hint_window_in_ms(), _hints_resource_manager, _db);
+        slogger.trace("hinted DCs: {}", dbcfg.hinted_handoff_enabled());
+        _hints_manager.emplace(dbcfg.hints_directory(), dbcfg.hinted_handoff_enabled, dbcfg.max_hint_window_in_ms(), _hints_resource_manager, _db);
         _hints_manager->register_metrics("hints_manager");
         _hints_resource_manager.register_manager(*_hints_manager);
     }
