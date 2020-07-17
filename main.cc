@@ -805,7 +805,6 @@ int main(int ac, char** av) {
                     , cfg->listen_on_broadcast_address());
             supervisor::notify("starting storage proxy");
             service::storage_proxy::config spcfg;
-            spcfg.hinted_handoff_enabled = hinted_handoff_enabled;
             spcfg.available_memory = memory::stats().total_memory();
             smp_service_group_config storage_proxy_smp_service_group_config;
             // Assuming less than 1kB per queued request, this limits storage_proxy submit_to() queues to 5MB or less

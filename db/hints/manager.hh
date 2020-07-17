@@ -41,6 +41,8 @@
 #include "utils/fragmented_temporary_buffer.hh"
 #include "db/hints/resource_manager.hh"
 #include "db/hints/host_filter.hh"
+#include "utils/observable.hh"
+#include "utils/updateable_value.hh"
 
 namespace service {
 class storage_service;
@@ -276,12 +278,14 @@ public:
 
         enum class state {
             can_hint,               // hinting is currently allowed (used by the space_watchdog)
+            passes_filter,          // hinting is not blocked by the host_filter
             stopping,               // stopping is in progress (stop() method has been called)
             stopped                 // stop() has completed
         };
 
         using state_set = enum_set<super_enum<state,
             state::can_hint,
+            state::passes_filter,
             state::stopping,
             state::stopped>>;
 
@@ -343,7 +347,7 @@ public:
         }
 
         bool can_hint() const noexcept {
-            return _state.contains(state::can_hint);
+            return _state.contains(state::can_hint) && _state.contains(state::passes_filter);
         }
 
         void allow_hints() noexcept {
@@ -352,6 +356,14 @@ public:
 
         void forbid_hints() noexcept {
             _state.remove(state::can_hint);
+        }
+
+        void allow_hints_by_host_filter() noexcept {
+            _state.set(state::passes_filter);
+        }
+
+        void forbid_hints_by_host_filter() noexcept {
+            _state.remove(state::passes_filter);
         }
 
         void set_stopping() noexcept {
@@ -450,6 +462,7 @@ private:
 
     node_to_hint_store_factory_type _store_factory;
     host_filter _host_filter;
+    utils::observer<host_filter> _host_filter_change_observer;
     shared_ptr<service::storage_proxy> _proxy_anchor;
     shared_ptr<gms::gossiper> _gossiper_anchor;
     shared_ptr<service::storage_service> _strorage_service_anchor;
@@ -468,7 +481,7 @@ private:
     seastar::named_semaphore _drain_lock = {1, named_semaphore_exception_factory{"drain lock"}};
 
 public:
-    manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<database>& db);
+    manager(sstring hints_directory, const utils::updateable_value<host_filter>& filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<database>& db);
     virtual ~manager();
     manager(manager&&) = delete;
     manager& operator=(manager&&) = delete;
@@ -670,6 +683,8 @@ private:
     void drain_for(gms::inet_address endpoint);
 
     void update_backlog(size_t backlog, size_t max_backlog);
+
+    void on_host_filter_update(const host_filter& filter);
 
     bool stopping() const noexcept {
         return _state.contains(state::stopping);
