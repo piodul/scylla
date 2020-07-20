@@ -558,7 +558,6 @@ int main(int ac, char** av) {
             sstring api_address = cfg->api_address() != "" ? cfg->api_address() : rpc_address;
             sstring broadcast_address = cfg->broadcast_address();
             sstring broadcast_rpc_address = cfg->broadcast_rpc_address();
-            const auto hinted_handoff_enabled = cfg->hinted_handoff_enabled();
             auto prom_addr = [&] {
                 try {
                     return gms::inet_address::lookup(cfg->prometheus_address(), family, preferred).get0();
@@ -742,7 +741,7 @@ int main(int ac, char** av) {
             verify_seastar_io_scheduler(opts.count("max-io-requests"), opts.count("io-properties") || opts.count("io-properties-file"),
                                         cfg->developer_mode()).get();
 
-            dirs.init(*cfg, bool(!hinted_handoff_enabled.is_disabled_for_all())).get();
+            dirs.init(*cfg).get();
 
             // We need the compaction manager ready early so we can reshard.
             db.invoke_on_all([&proxy, &stop_signal] (database& db) {
@@ -961,9 +960,7 @@ int main(int ac, char** av) {
             api::set_server_stream_manager(ctx).get();
 
             supervisor::notify("starting hinted handoff manager");
-            if (!hinted_handoff_enabled.is_disabled_for_all()) {
-                db::hints::manager::rebalance(cfg->hints_directory()).get();
-            }
+            db::hints::manager::rebalance(cfg->hints_directory()).get();
             db::hints::manager::rebalance(cfg->view_hints_directory()).get();
 
             proxy.invoke_on_all([] (service::storage_proxy& local_proxy) {

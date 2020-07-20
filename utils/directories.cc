@@ -85,14 +85,12 @@ static void add_sharded(sstring p, std::set<fs::path>& to) {
     }
 }
 
-future<> directories::init(db::config& cfg, bool hinted_handoff_enabled) {
+future<> directories::init(db::config& cfg) {
     std::set<fs::path> paths;
 
     add(cfg.data_file_directories(), paths);
     add(cfg.commitlog_directory(), paths);
-    if (hinted_handoff_enabled) {
-        add_sharded(cfg.hints_directory(), paths);
-    }
+    add_sharded(cfg.hints_directory(), paths);
     add_sharded(cfg.view_hints_directory(), paths);
 
     supervisor::notify("creating and verifying directories");

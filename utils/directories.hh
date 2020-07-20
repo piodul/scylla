@@ -36,7 +36,7 @@ namespace utils {
 
 class directories {
 public:
-    future<> init(db::config& cfg, bool hinted_handoff_enabled);
+    future<> init(db::config& cfg);
 private:
     future<> touch_and_lock(fs::path path);
     std::vector<file_lock> _locks;
