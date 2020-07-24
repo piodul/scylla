@@ -591,6 +591,9 @@ public:
     virtual void on_up(const gms::inet_address& endpoint) override {}
     virtual void on_down(const gms::inet_address& endpoint) override {}
 
+    void set_host_filter(const host_filter& filter);
+    host_filter get_host_filter() const;
+
 private:
     future<> compute_hints_dir_device_id();
 

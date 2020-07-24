@@ -5217,6 +5217,14 @@ void storage_proxy::allow_replaying_hints() noexcept {
     return _hints_resource_manager.allow_replaying();
 }
 
+void storage_proxy::set_hints_host_filter(const db::hints::host_filter& new_filter) {
+    _hints_manager.set_host_filter(new_filter);
+}
+
+db::hints::host_filter storage_proxy::get_hints_host_filter() const {
+    return _hints_manager.get_host_filter();
+}
+
 void storage_proxy::on_join_cluster(const gms::inet_address& endpoint) {};
 
 void storage_proxy::on_leave_cluster(const gms::inet_address& endpoint) {};
