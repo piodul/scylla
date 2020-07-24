@@ -1026,6 +1026,14 @@ void manager::update_backlog(size_t backlog, size_t max_backlog) {
     }
 }
 
+void manager::set_host_filter(const host_filter& filter) {
+    on_host_filter_update(filter);
+}
+
+host_filter manager::get_host_filter() const {
+    return _host_filter;
+}
+
 void manager::on_host_filter_update(const host_filter& filter) {
     manager_logger.debug("updating host filtering configuration: {}", filter);
 
