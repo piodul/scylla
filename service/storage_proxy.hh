@@ -63,6 +63,8 @@
 #include "service_permit.hh"
 #include "service/client_state.hh"
 #include "cdc/stats.hh"
+#include "db/hints/host_filter.hh"
+#include "db/config.hh"
 
 class reconcilable_result;
 class frozen_mutation_and_schema;
@@ -158,7 +160,7 @@ class storage_proxy : public seastar::async_sharded_service<storage_proxy>, publ
 public:
     using clock_type = lowres_clock;
     struct config {
-        std::optional<std::vector<sstring>> hinted_handoff_enabled = {};
+        db::config::hinted_handoff_enabled_type hinted_handoff_enabled = {};
         size_t available_memory;
         smp_service_group read_smp_service_group = default_smp_service_group();
         smp_service_group write_smp_service_group = default_smp_service_group();
