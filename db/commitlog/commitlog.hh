@@ -101,6 +101,7 @@ class commitlog {
 public:
     class segment_manager;
     class segment;
+    class segment_handle;
 
     friend class rp_handle;
 
@@ -115,6 +116,7 @@ public:
         PERIODIC, BATCH
     };
     using force_sync = commitlog_entry_writer::force_sync;
+    using segment_receiver = std::function<void(segment_handle)>;
     struct config {
         config() = default;
         config(const config&) = default;
@@ -140,6 +142,8 @@ public:
         bool use_o_dsync = false;
         bool warn_about_segments_left_on_disk_after_shutdown = true;
 
+        segment_receiver seg_receiver;
+
         const db::extensions * extensions = nullptr;
     };
 
@@ -163,6 +167,25 @@ public:
         const segment_id_type id;
         const uint32_t ver;
         const std::string filename_prefix = FILENAME_PREFIX;
+    };
+
+    struct segment_handle {
+    private:
+        ::shared_ptr<segment> _seg;
+
+        segment_handle(::shared_ptr<segment> seg);
+    public:
+        segment_handle(const segment_handle& other) = delete;
+        segment_handle(segment_handle&& other) = default;
+        ~segment_handle();
+
+        segment_handle& operator=(const segment_handle& other) = delete;
+        segment_handle& operator=(segment_handle&& other) = default;
+
+        void free();
+        sstring get_filename() const;
+
+        friend class commitlog;
     };
 
     commitlog(commitlog&&) noexcept;

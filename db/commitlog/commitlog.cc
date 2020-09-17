@@ -455,6 +455,7 @@ class db::commitlog::segment : public enable_shared_from_this<segment>, public c
     bool _closed_file = false;
 
     bool _terminated = false;
+    bool _handed_to_receiver = false;
 
     using buffer_type = segment_manager::buffer_type;
     using sseg_ptr = segment_manager::sseg_ptr;
@@ -464,6 +465,7 @@ class db::commitlog::segment : public enable_shared_from_this<segment>, public c
     buffer_type _buffer;
     fragmented_temporary_buffer::ostream _buffer_ostream;
     std::unordered_map<cf_id_type, uint64_t> _cf_dirty;
+    uint64_t _handles_pointing = 0;
     time_point _sync_time;
     utils::flush_queue<replay_position, std::less<replay_position>, clock_type> _pending_ops;
 
@@ -639,7 +641,18 @@ public:
     }
     future<sseg_ptr> close() {
         _closed = true;
-        return sync().then([] (sseg_ptr s) { return s->flush(); }).then([] (sseg_ptr s) { return s->terminate(); });
+        return sync().then([] (sseg_ptr s) { return s->flush(); }).then([] (sseg_ptr s) { return s->terminate(); }).then([] (sseg_ptr s) {
+            if (!std::exchange(s->_handed_to_receiver, true)) {
+                try {
+                    if (s->_segment_manager->cfg.seg_receiver) {
+                        s->_segment_manager->cfg.seg_receiver(segment_handle(s));
+                    }
+                } catch (...) {
+                    clogger.error("Caught error from segment_receiver: {}", std::current_exception());
+                }
+            }
+            return make_ready_future<sseg_ptr>(std::move(s));
+        });
     }
     future<sseg_ptr> do_flush(uint64_t pos) {
         auto me = shared_from_this();
@@ -984,8 +997,11 @@ public:
     bool is_clean() const {
         return _cf_dirty.empty();
     }
+    bool is_held() const {
+        return _handles_pointing != 0;
+    }
     bool is_unused() const {
-        return !is_still_allocating() && is_clean();
+        return !is_still_allocating() && is_clean() && !is_held();
     }
     bool is_flushed() const {
         return position() <= _flush_pos;
@@ -998,6 +1014,13 @@ public:
     }
     sstring get_segment_name() const {
         return _desc.filename();
+    }
+
+    void inc_handles_pointing() {
+        ++_handles_pointing;
+    }
+    void dec_handles_pointing() {
+        --_handles_pointing;
     }
 };
 
@@ -1494,6 +1517,8 @@ void db::commitlog::segment_manager::discard_unused_segments() {
             clogger.debug("Not safe to delete segment {}; still allocating.", s);
         } else if (!s->is_clean()) {
             clogger.debug("Not safe to delete segment {}; dirty is {}", s, segment::cf_mark {*s});
+        } else if (s->is_held()) {
+            clogger.debug("Not safe to delete segment {}; segment is being held", s);
         } else {
             clogger.debug("Not safe to delete segment {}; disk ops pending", s);
         }
@@ -1783,6 +1808,28 @@ future<db::rp_handle> db::commitlog::add_entry(const cf_id_type& id, const commi
     };
     auto writer = ::make_shared<cl_entry_writer>(cew);
     return _segment_manager->allocate_when_possible(id, writer, timeout);
+}
+
+db::commitlog::segment_handle::segment_handle(::shared_ptr<segment> seg)
+        : _seg(std::move(seg)) {
+    if (_seg) {
+        _seg->inc_handles_pointing();
+    }
+}
+
+db::commitlog::segment_handle::~segment_handle() {
+    // Slightly different behavior than rp_handle, need to be freed manually
+}
+
+void db::commitlog::segment_handle::free() {
+    if (_seg) {
+        _seg->dec_handles_pointing();
+        _seg = nullptr;
+    }
+}
+
+sstring db::commitlog::segment_handle::get_filename() const {
+    return _seg->_segment_manager->cfg.commit_log_location + "/" + _seg->get_segment_name();
 }
 
 db::commitlog::commitlog(config cfg)
