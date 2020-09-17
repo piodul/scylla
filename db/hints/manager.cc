@@ -341,12 +341,16 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
             // during standard HH workload, so no need to print a warning about it.
             cfg.warn_about_segments_left_on_disk_after_shutdown = false;
 
+            cfg.seg_receiver = [this] (db::commitlog::segment_handle h) {
+                _sender.add_segment_handle(std::move(h));
+            };
+
             return commitlog::create_commitlog(std::move(cfg)).then([this] (commitlog l) {
                 // add_store() is triggered every time hint files are forcefully flushed to I/O (every hints_flush_period).
                 // When this happens we want to refill _sender's segments only if it has finished with the segments he had before.
-                if (_sender.have_segments()) {
-                    return make_ready_future<commitlog>(std::move(l));
-                }
+                // if (_sender.have_segments()) {
+                //     return make_ready_future<commitlog>(std::move(l));
+                // }
 
                 std::vector<sstring> segs_vec = l.get_segments_to_replay();
 
@@ -362,22 +366,28 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
 
 future<> manager::end_point_hints_manager::flush_current_hints() noexcept {
     // flush the currently created hints to disk
+    // if (_hints_store_anchor) {
+    //     return futurize_invoke([this] {
+    //         return with_lock(file_update_mutex(), [this]() -> future<> {
+    //             return get_or_load().then([] (hints_store_ptr cptr) {
+    //                 return cptr->shutdown().finally([cptr] {
+    //                     return cptr->release();
+    //                 }).finally([cptr] {});
+    //             }).then([this] {
+    //                 // Un-hold the commitlog object. Since we are under the exclusive _file_update_mutex lock there are no
+    //                 // other hints_store_ptr copies and this would destroy the commitlog shared value.
+    //                 _hints_store_anchor = nullptr;
+
+    //                 // Re-create the commitlog instance - this will re-populate the _segments_to_replay if needed.
+    //                 return get_or_load().discard_result();
+    //             });
+    //         });
+    //     });
+    // }
+
     if (_hints_store_anchor) {
         return futurize_invoke([this] {
-            return with_lock(file_update_mutex(), [this]() -> future<> {
-                return get_or_load().then([] (hints_store_ptr cptr) {
-                    return cptr->shutdown().finally([cptr] {
-                        return cptr->release();
-                    }).finally([cptr] {});
-                }).then([this] {
-                    // Un-hold the commitlog object. Since we are under the exclusive _file_update_mutex lock there are no
-                    // other hints_store_ptr copies and this would destroy the commitlog shared value.
-                    _hints_store_anchor = nullptr;
-
-                    // Re-create the commitlog instance - this will re-populate the _segments_to_replay if needed.
-                    return get_or_load().discard_result();
-                });
-            });
+            return _hints_store_anchor->close_last();
         });
     }
 
@@ -653,6 +663,13 @@ void manager::end_point_hints_manager::sender::add_segment(sstring seg_name) {
     _segments_to_replay.emplace_back(std::move(seg_name));
 }
 
+// TODO: Deduplicate somehow
+// We can probably achieve it by returning segments_to_replay from commitlog as handles or something
+// Those don't need to have sseg_ptrs, filenames will suffice
+void manager::end_point_hints_manager::sender::add_segment_handle(db::commitlog::segment_handle seg_handle) {
+    _segment_handles_to_replay.emplace_back(std::move(seg_handle));
+}
+
 manager::end_point_hints_manager::sender::clock::duration manager::end_point_hints_manager::sender::next_sleep_duration() const {
     clock::time_point current_time = clock::now();
     clock::time_point next_flush_tp = std::max(_next_flush_tp, current_time);
@@ -825,11 +842,20 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
 
     try {
         while (replay_allowed() && have_segments()) {
-            if (!send_one_file(*_segments_to_replay.begin())) {
-                break;
+            if (!_segments_to_replay.empty()) {
+                if (!send_one_file(*_segments_to_replay.begin())) {
+                    break;
+                }
+                _segments_to_replay.pop_front();
+                ++replayed_segments_count;
+            } else if (!_segment_handles_to_replay.empty()) {
+                if (!send_one_file(_segment_handles_to_replay.front().get_filename())) {
+                    break;
+                }
+                _segment_handles_to_replay.front().free();
+                _segment_handles_to_replay.pop_front();
+                ++replayed_segments_count;
             }
-            _segments_to_replay.pop_front();
-            ++replayed_segments_count;
         }
 
     // Ignore exceptions, we will retry sending this file from where we left off the next time.

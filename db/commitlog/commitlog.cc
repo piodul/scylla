@@ -363,6 +363,7 @@ public:
     }
 
     void flush_segments(bool = false);
+    future<> close_last();
 
 private:
     future<> clear_reserve_segments();
@@ -439,6 +440,7 @@ std::enable_if_t<std::is_fundamental<T>::value, T> read(Input& in) {
 
 class db::commitlog::segment : public enable_shared_from_this<segment>, public cf_holder {
     friend class rp_handle;
+    friend class segment_handle;
 
     ::shared_ptr<segment_manager> _segment_manager;
 
@@ -640,7 +642,9 @@ public:
         return make_ready_future<sseg_ptr>(shared_from_this());
     }
     future<sseg_ptr> close() {
-        _closed = true;
+        if (std::exchange(_closed, true)) {
+            return make_ready_future<sseg_ptr>(shared_from_this());
+        }
         return sync().then([] (sseg_ptr s) { return s->flush(); }).then([] (sseg_ptr s) { return s->terminate(); }).then([] (sseg_ptr s) {
             if (!std::exchange(s->_handed_to_receiver, true)) {
                 try {
@@ -1306,6 +1310,14 @@ void db::commitlog::segment_manager::flush_segments(bool force) {
     }
 }
 
+future<> db::commitlog::segment_manager::close_last() {
+    if (_segments.empty()) {
+        return make_ready_future<>();
+    }
+
+    return _segments.back()->close().discard_result();
+}
+
 future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment_ex(descriptor d, sstring filename, open_flags flags) {
     file_open_options opt;
     opt.extent_allocation_size_hint = max_size;
@@ -1904,6 +1916,10 @@ future<> db::commitlog::shutdown() {
 
 future<> db::commitlog::release() {
     return _segment_manager->orphan_all();
+}
+
+future<> db::commitlog::close_last() {
+    return _segment_manager->close_last();
 }
 
 size_t db::commitlog::max_record_size() const {

@@ -111,6 +111,7 @@ public:
 
         private:
             std::list<sstring> _segments_to_replay;
+            std::list<db::commitlog::segment_handle> _segment_handles_to_replay;
             replay_position _last_not_complete_rp;
             std::unordered_map<table_schema_version, column_mapping> _last_schema_ver_to_column_mapping;
             state_set _state;
@@ -153,9 +154,11 @@ public:
             /// \brief Add a new segment ready for sending.
             void add_segment(sstring seg_name);
 
+            void add_segment_handle(db::commitlog::segment_handle seg_handle);
+
             /// \brief Check if there are still unsent segments.
             /// \return TRUE if there are still unsent segments.
-            bool have_segments() const noexcept { return !_segments_to_replay.empty(); };
+            bool have_segments() const noexcept { return !_segments_to_replay.empty() || !_segment_handles_to_replay.empty(); }
 
         private:
             /// \brief Send hints collected so far.

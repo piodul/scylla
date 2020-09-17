@@ -101,9 +101,9 @@ class commitlog {
 public:
     class segment_manager;
     class segment;
-    class segment_handle;
 
     friend class rp_handle;
+    friend class segment_handle;
 
     struct buffer_and_replay_position {
         fragmented_temporary_buffer buffer;
@@ -116,7 +116,27 @@ public:
         PERIODIC, BATCH
     };
     using force_sync = commitlog_entry_writer::force_sync;
+
+    struct segment_handle {
+    private:
+        ::shared_ptr<segment> _seg;
+
+        segment_handle(::shared_ptr<segment> seg);
+    public:
+        segment_handle(const segment_handle& other) = delete;
+        segment_handle(segment_handle&& other) = default;
+        ~segment_handle();
+
+        segment_handle& operator=(const segment_handle& other) = delete;
+        segment_handle& operator=(segment_handle&& other) = default;
+
+        void free();
+        sstring get_filename() const;
+
+        friend class commitlog;
+    };
     using segment_receiver = std::function<void(segment_handle)>;
+
     struct config {
         config() = default;
         config(const config&) = default;
@@ -167,25 +187,6 @@ public:
         const segment_id_type id;
         const uint32_t ver;
         const std::string filename_prefix = FILENAME_PREFIX;
-    };
-
-    struct segment_handle {
-    private:
-        ::shared_ptr<segment> _seg;
-
-        segment_handle(::shared_ptr<segment> seg);
-    public:
-        segment_handle(const segment_handle& other) = delete;
-        segment_handle(segment_handle&& other) = default;
-        ~segment_handle();
-
-        segment_handle& operator=(const segment_handle& other) = delete;
-        segment_handle& operator=(segment_handle&& other) = default;
-
-        void free();
-        sstring get_filename() const;
-
-        friend class commitlog;
     };
 
     commitlog(commitlog&&) noexcept;
@@ -368,6 +369,8 @@ public:
      * commitlog proper. (hint, our shutdown is "partial")
      */
     future<> release();
+
+    future<> close_last();
 
     future<std::vector<descriptor>> list_existing_descriptors() const;
     future<std::vector<descriptor>> list_existing_descriptors(const sstring& dir) const;
