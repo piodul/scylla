@@ -94,7 +94,17 @@ void manager::register_metrics(const sstring& group_name) {
 
         sm::make_gauge("pending_sends",
                         sm::description("Number of tasks waiting in the queue for sending a hint"),
-                        [this] { return _resource_manager.sending_queue_length(); })
+                        [this] { return _resource_manager.sending_queue_length(); }),
+
+        sm::make_gauge("segments_to_replay",
+                        sm::description("Number of hints segments residing on disk"),
+                        [this] {
+                            uint64_t ret = 0;
+                            for (auto& p : _ep_managers) {
+                                ret += p.second.get_segment_to_replay_count();
+                            }
+                            return ret;
+                        })
     });
 }
 

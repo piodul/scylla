@@ -160,6 +160,10 @@ public:
             /// \return TRUE if there are still unsent segments.
             bool have_segments() const noexcept { return !_segments_to_replay.empty() || !_segment_handles_to_replay.empty(); }
 
+            size_t get_segment_to_replay_count() const {
+                return _segments_to_replay.size() + _segment_handles_to_replay.size();
+            }
+
         private:
             /// \brief Send hints collected so far.
             ///
@@ -393,6 +397,10 @@ public:
 
         const fs::path& hints_dir() const noexcept {
             return _hints_dir;
+        }
+
+        size_t get_segment_to_replay_count() const {
+            return _sender.get_segment_to_replay_count();
         }
 
     private:
