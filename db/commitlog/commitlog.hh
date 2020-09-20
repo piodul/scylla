@@ -117,11 +117,13 @@ public:
     };
     using force_sync = commitlog_entry_writer::force_sync;
 
+    class segment_holder;
+
     struct segment_handle {
     private:
-        ::shared_ptr<segment> _seg;
+        ::shared_ptr<segment_holder> _seg;
 
-        segment_handle(::shared_ptr<segment> seg);
+        segment_handle(::shared_ptr<segment_holder> seg);
     public:
         segment_handle(const segment_handle& other) = delete;
         segment_handle(segment_handle&& other) = default;
@@ -309,6 +311,8 @@ public:
      */
     std::vector<sstring> get_segments_to_replay() const;
 
+    future<std::vector<segment_handle>> get_segments_to_replay_as_handles() const;
+
     /**
      * Delete aforementioned segments, and possible metadata
      * associated with them
@@ -316,6 +320,7 @@ public:
     future<> delete_segments(std::vector<sstring>) const;
 
     uint64_t get_total_size() const;
+    uint64_t get_total_size_on_disk() const;
     uint64_t get_completed_tasks() const;
     uint64_t get_flush_count() const;
     uint64_t get_pending_tasks() const;

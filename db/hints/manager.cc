@@ -99,7 +99,7 @@ void manager::register_metrics(const sstring& group_name) {
         sm::make_gauge("segments_to_replay",
                         sm::description("Number of hints segments residing on disk"),
                         [this] {
-                            uint64_t ret = 0;
+                            size_t ret = 0;
                             for (auto& p : _ep_managers) {
                                 ret += p.second.get_segment_to_replay_count();
                             }
@@ -211,6 +211,13 @@ bool manager::end_point_hints_manager::store_hint(schema_ptr s, lw_shared_ptr<co
         return false;
     }
     return true;
+}
+
+uint64_t manager::end_point_hints_manager::get_disk_usage_in_bytes() const {
+    if (_hints_store_anchor) {
+        return _hints_store_anchor->get_total_size_on_disk();
+    }
+    return 0;
 }
 
 future<> manager::end_point_hints_manager::populate_segments_to_replay() {
@@ -342,6 +349,7 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
             cfg.commitlog_total_space_in_mb = resource_manager::max_hints_per_ep_size_mb;
             cfg.fname_prefix = manager::FILENAME_PREFIX;
             cfg.extensions = &_shard_manager.local_db().extensions();
+            cfg.metrics_category_name = sstring("hints_commitlog_") + _key.to_sstring();
 
             // HH doesn't utilize the flow that benefits from reusing segments.
             // Therefore let's simply disable it to avoid any possible confusion.
@@ -362,13 +370,20 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
                 //     return make_ready_future<commitlog>(std::move(l));
                 // }
 
-                std::vector<sstring> segs_vec = l.get_segments_to_replay();
-
-                std::for_each(segs_vec.begin(), segs_vec.end(), [this] (sstring& seg) {
-                    _sender.add_segment(std::move(seg));
+                return do_with(std::move(l), [this] (commitlog& l) {
+                    return l.get_segments_to_replay_as_handles().then([this, &l] (std::vector<db::commitlog::segment_handle> handles_to_replay) {
+                        for (db::commitlog::segment_handle& h : handles_to_replay) {
+                            _sender.add_segment_handle(std::move(h));
+                        }
+                        return make_ready_future<commitlog>(std::move(l));
+                    });
                 });
 
-                return make_ready_future<commitlog>(std::move(l));
+                // std::vector<sstring> segs_vec = l.get_segments_to_replay();
+
+                // std::for_each(segs_vec.begin(), segs_vec.end(), [this] (sstring& seg) {
+                //     _sender.add_segment(std::move(seg));
+                // });
             });
         });
     });
@@ -744,7 +759,7 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
                 return this->send_one_mutation(std::move(m)).then([this, rp, ctx_ptr] {
                     ++this->shard_stats().sent;
                 }).handle_exception([this, ctx_ptr, rp] (auto eptr) {
-                    manager_logger.trace("send_one_hint(): failed to send to {}: {}", end_point_key(), eptr);
+                    manager_logger.debug("send_one_hint(): failed to send to {}: {}", end_point_key(), eptr);
                     ctx_ptr->on_hint_send_failure(rp);
                 });
 
@@ -765,7 +780,7 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
             return make_ready_future<>();
         }).finally([units = std::move(units), ctx_ptr] {});
     }).handle_exception([this, ctx_ptr, rp] (auto eptr) {
-        manager_logger.trace("send_one_file(): Hmmm. Something bad had happend: {}", eptr);
+        manager_logger.debug("send_one_file(): Hmmm. Something bad had happend: {}", eptr);
         ctx_ptr->on_hint_send_failure(rp);
     });
 }

@@ -121,6 +121,14 @@ public:
     virtual void release_cf_count(const cf_id_type&) = 0;
 };
 
+class db::commitlog::segment_holder {
+public:
+    virtual ~segment_holder() {};
+    virtual void inc_handles_pointing() = 0;
+    virtual void dec_handles_pointing() = 0;
+    virtual sstring get_filename() const = 0;
+};
+
 db::commitlog::config db::commitlog::config::from_db_config(const db::config& cfg, size_t shard_available_memory) {
     config c;
 
@@ -235,7 +243,7 @@ public:
     request_controller_type _request_controller;
 
     std::optional<shared_future<with_clock<db::timeout_clock>>> _segment_allocating;
-    std::unordered_map<sstring, descriptor> _files_to_delete;
+    std::unordered_set<sstring> _files_to_delete;
     std::vector<file> _files_to_close;
 
     void account_memory_usage(size_t size) {
@@ -323,7 +331,7 @@ public:
 
     future<> orphan_all();
 
-    void add_file_to_delete(sstring, descriptor);
+    void add_file_to_delete(sstring);
     void add_file_to_close(file);
 
     future<> do_pending_deletes();
@@ -438,7 +446,10 @@ std::enable_if_t<std::is_fundamental<T>::value, T> read(Input& in) {
  *
  */
 
-class db::commitlog::segment : public enable_shared_from_this<segment>, public cf_holder {
+class db::commitlog::segment
+        : public enable_shared_from_this<segment>
+        , public cf_holder
+        , public commitlog::segment_holder {
     friend class rp_handle;
     friend class segment_handle;
 
@@ -532,7 +543,7 @@ public:
             clogger.debug("Segment {} is no longer active and will submitted for delete now", *this);
             ++_segment_manager->totals.segments_destroyed;
             _segment_manager->totals.active_size_on_disk -= file_position();
-            _segment_manager->add_file_to_delete(_file_name, _desc);
+            _segment_manager->add_file_to_delete(_file_name);
         } else if (_segment_manager->cfg.warn_about_segments_left_on_disk_after_shutdown) {
             clogger.warn("Segment {} is dirty and is left on disk.", *this);
         }
@@ -1025,6 +1036,10 @@ public:
     }
     void dec_handles_pointing() {
         --_handles_pointing;
+    }
+
+    sstring get_filename() const override {
+        return _segment_manager->cfg.commit_log_location + "/" + get_segment_name();
     }
 };
 
@@ -1616,9 +1631,9 @@ future<> db::commitlog::segment_manager::shutdown() {
     return _shutdown_promise->get_shared_future();
 }
 
-void db::commitlog::segment_manager::add_file_to_delete(sstring filename, descriptor d) {
+void db::commitlog::segment_manager::add_file_to_delete(sstring filename) {
     assert(!_files_to_delete.contains(filename));
-    _files_to_delete.emplace(std::move(filename), std::move(d));
+    _files_to_delete.emplace(std::move(filename));
 }
 
 void db::commitlog::segment_manager::add_file_to_close(file f) {
@@ -1679,7 +1694,7 @@ future<> db::commitlog::segment_manager::do_pending_deletes() {
     return parallel_for_each(i, e, [](file & f) {
         return f.close();
     }).then([this, ftc = std::move(ftc), ftd = std::move(ftd)] {
-        return delete_segments(boost::copy_range<std::vector<sstring>>(ftd | boost::adaptors::map_keys));
+        return delete_segments(boost::copy_range<std::vector<sstring>>(ftd));
     });
 }
 
@@ -1822,7 +1837,63 @@ future<db::rp_handle> db::commitlog::add_entry(const cf_id_type& id, const commi
     return _segment_manager->allocate_when_possible(id, writer, timeout);
 }
 
-db::commitlog::segment_handle::segment_handle(::shared_ptr<segment> seg)
+class pre_boot_segment_holder final : public db::commitlog::segment_holder {
+public:
+    static future<pre_boot_segment_holder> create(::shared_ptr<db::commitlog::segment_manager> segment_manager, sstring file_name);
+
+    pre_boot_segment_holder(pre_boot_segment_holder&&) noexcept;
+    ~pre_boot_segment_holder() override;
+
+    void inc_handles_pointing() override {
+        ++_handles_pointing;
+    }
+    void dec_handles_pointing() override {
+        --_handles_pointing;
+    }
+
+    uint64_t get_size_on_disk() const {
+        return _size_on_disk;
+    }
+
+    sstring get_filename() const override {
+        return _file_name;
+    }
+
+private:
+    pre_boot_segment_holder(::shared_ptr<db::commitlog::segment_manager> segment_manager, sstring file_name, uint64_t size_on_disk)
+            : _manager(std::move(segment_manager))
+            , _file_name(std::move(file_name))
+            , _size_on_disk(size_on_disk)
+    { }
+
+    ::shared_ptr<db::commitlog::segment_manager> _manager;
+
+    size_t _handles_pointing = 0;
+    sstring _file_name;
+    uint64_t _size_on_disk = 0;
+};
+
+future<pre_boot_segment_holder> pre_boot_segment_holder::create(::shared_ptr<db::commitlog::segment_manager> segment_manager, sstring file_name) {
+    return io_check(file_size, file_name.c_str()).then([segment_manager = std::move(segment_manager), file_name] (uint64_t fsize) mutable {
+        return make_ready_future<pre_boot_segment_holder>(pre_boot_segment_holder(std::move(segment_manager), std::move(file_name), fsize));
+    });
+}
+
+pre_boot_segment_holder::pre_boot_segment_holder(pre_boot_segment_holder&& other) noexcept
+        : _manager(std::move(other._manager))
+        , _handles_pointing(other._handles_pointing)
+        , _file_name(std::move(other._file_name))
+        , _size_on_disk(other._size_on_disk) {
+    other._handles_pointing = 0;
+}
+
+pre_boot_segment_holder::~pre_boot_segment_holder() {
+    if (_manager != nullptr && _handles_pointing == 0) {
+        _manager->add_file_to_delete(std::move(_file_name));
+    }
+}
+
+db::commitlog::segment_handle::segment_handle(::shared_ptr<segment_holder> seg)
         : _seg(std::move(seg)) {
     if (_seg) {
         _seg->inc_handles_pointing();
@@ -1841,7 +1912,7 @@ void db::commitlog::segment_handle::free() {
 }
 
 sstring db::commitlog::segment_handle::get_filename() const {
-    return _seg->_segment_manager->cfg.commit_log_location + "/" + _seg->get_segment_name();
+    return _seg->get_filename();
 }
 
 db::commitlog::commitlog(config cfg)
@@ -2215,6 +2286,10 @@ uint64_t db::commitlog::get_total_size() const {
     return _segment_manager->totals.active_size_on_disk + _segment_manager->totals.buffer_list_bytes;
 }
 
+uint64_t db::commitlog::get_total_size_on_disk() const {
+    return _segment_manager->totals.total_size_on_disk;
+}
+
 uint64_t db::commitlog::get_completed_tasks() const {
     return _segment_manager->totals.allocation_count;
 }
@@ -2279,6 +2354,23 @@ future<std::vector<sstring>> db::commitlog::list_existing_segments(const sstring
 
 std::vector<sstring> db::commitlog::get_segments_to_replay() const {
     return std::move(_segment_manager->_segments_to_replay);
+}
+
+future<std::vector<db::commitlog::segment_handle>> db::commitlog::get_segments_to_replay_as_handles() const {
+    return do_with(std::vector<segment_handle>(), uint64_t(0), [this] (std::vector<segment_handle>& handles, uint64_t& total_bytes) {
+        return parallel_for_each(_segment_manager->_segments_to_replay, [this, &handles, &total_bytes] (sstring file_name) {
+            return pre_boot_segment_holder::create(_segment_manager, std::move(file_name)).then([this, &handles, &total_bytes] (pre_boot_segment_holder pbsh) {
+                total_bytes += pbsh.get_size_on_disk();
+                auto pbsh_ptr = make_shared<pre_boot_segment_holder>(std::move(pbsh));
+                handles.push_back(segment_handle(pbsh_ptr));
+                return make_ready_future<>();
+            });
+        }).then([this, &handles, &total_bytes] {
+            _segment_manager->_segments_to_replay.clear();
+            _segment_manager->totals.total_size_on_disk += total_bytes;
+            return make_ready_future<std::vector<db::commitlog::segment_handle>>(std::move(handles));
+        });
+    });
 }
 
 future<> db::commitlog::delete_segments(std::vector<sstring> files) const {

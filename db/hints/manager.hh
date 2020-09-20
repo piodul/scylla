@@ -403,6 +403,8 @@ public:
             return _sender.get_segment_to_replay_count();
         }
 
+        uint64_t get_disk_usage_in_bytes() const;
+
     private:
         seastar::shared_mutex& file_update_mutex() noexcept {
             return _file_update_mutex;
