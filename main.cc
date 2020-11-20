@@ -86,6 +86,10 @@
 #include "alternator/rmw_operation.hh"
 #include "db/paxos_grace_seconds_extension.hh"
 
+#include <dlfcn.h>
+#include <stdio.h>
+#include <unistd.h>
+
 namespace fs = std::filesystem;
 
 seastar::metrics::metric_groups app_metrics;
@@ -416,6 +420,16 @@ static auto defer_verbose_shutdown(const char* what, Func&& func) {
 
     auto ret = deferred_action(std::move(vfunc));
     return ::make_shared<decltype(ret)>(std::move(ret));
+}
+
+void call_gprof_exit_handler() {
+    using mcleanup_fn = void (*)(void);
+    mcleanup_fn mcfn = (mcleanup_fn)dlsym(RTLD_DEFAULT, "_mcleanup");
+    if (mcfn == nullptr) {
+        startlog.error("Could not find gprof exit hook, no gmon.out will be produced");
+    } else {
+        mcfn();
+    }
 }
 
 namespace debug {
@@ -1342,6 +1356,10 @@ int main(int ac, char** av) {
             return 1;
           }
           startlog.info("Scylla version {} shutdown complete.", scylla_version());
+
+          // Because we are not exiting normally, we need to call the gprof's exit handler manually.
+          call_gprof_exit_handler();
+
           // We should be returning 0 here, but the system is not yet prepared for orderly rollback of main() objects
           // and thread_local variables.
           _exit(0);

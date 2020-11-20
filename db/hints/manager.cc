@@ -346,7 +346,7 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
 
             cfg.commit_log_location = _hints_dir.c_str();
             cfg.commitlog_segment_size_in_mb = resource_manager::hint_segment_size_in_mb;
-            cfg.commitlog_total_space_in_mb = resource_manager::max_hints_per_ep_size_mb;
+            cfg.commitlog_total_space_in_mb = 1024 * 1024; // 1 TB for now
             cfg.fname_prefix = manager::FILENAME_PREFIX;
             cfg.extensions = &_shard_manager.local_db().extensions();
             cfg.metrics_category_name = sstring("hints_commitlog_") + _key.to_sstring();
@@ -846,10 +846,10 @@ bool manager::end_point_hints_manager::sender::send_one_file(const sstring& fnam
     }
 
     // If we got here we are done with the current segment and we can remove it.
-    with_shared(_file_update_mutex, [&fname, this] {
-        auto p = _ep_manager.get_or_load().get0();
-        return p->delete_segments({ fname });
-    }).get();
+    // with_shared(_file_update_mutex, [&fname, this] {
+    //     auto p = _ep_manager.get_or_load().get0();
+    //     return p->delete_segments({ fname });
+    // }).get();
 
     // clear the replay position - we are going to send the next segment...
     _last_not_complete_rp = replay_position();
