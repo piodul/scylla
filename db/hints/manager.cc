@@ -351,18 +351,15 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
 
             return commitlog::create_commitlog(std::move(cfg)).then([this] (commitlog l) {
                 // add_store() is triggered every time hint files are forcefully flushed to I/O (every hints_flush_period).
-                // When this happens we want to refill _sender's segments only if it has finished with the segments he had before.
-                if (_sender.have_segments()) {
+                // We would like to keep the list of segments up-to-date, so after every flush we append segments
+                // we didn't see before to the queue.
+                return do_with(l.get_segments_to_replay(), [this] (std::vector<sstring>& segs_vec) {
+                    return do_for_each(segs_vec, [this] (sstring& seg) {
+                        _sender.add_segment(std::move(seg));
+                    });
+                }).then([l = std::move(l)] () mutable {
                     return make_ready_future<commitlog>(std::move(l));
-                }
-
-                std::vector<sstring> segs_vec = l.get_segments_to_replay();
-
-                std::for_each(segs_vec.begin(), segs_vec.end(), [this] (sstring& seg) {
-                    _sender.add_segment(std::move(seg));
                 });
-
-                return make_ready_future<commitlog>(std::move(l));
             });
         });
     });
@@ -688,7 +685,18 @@ future<> manager::end_point_hints_manager::sender::stop(drain should_drain) noex
 }
 
 void manager::end_point_hints_manager::sender::add_segment(sstring seg_name) {
-    _segments_to_replay.emplace_back(std::move(seg_name));
+    auto [it, inserted] = _segments_to_replay_set.emplace(seg_name);
+    if (!inserted) {
+        return;
+    }
+
+    try {
+        _segments_to_replay.push_back(std::move(seg_name));
+    } catch (...) {
+        // Failed to push into the list - remove from the set
+        _segments_to_replay_set.erase(it);
+        throw;
+    }
 }
 
 manager::end_point_hints_manager::sender::clock::duration manager::end_point_hints_manager::sender::next_sleep_duration() const {
@@ -867,6 +875,7 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
             if (!send_one_file(*_segments_to_replay.begin())) {
                 break;
             }
+            _segments_to_replay_set.erase(*_segments_to_replay.begin());
             _segments_to_replay.pop_front();
             ++replayed_segments_count;
         }

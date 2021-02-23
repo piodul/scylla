@@ -23,6 +23,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <list>
 #include <chrono>
@@ -135,6 +136,7 @@ public:
 
         private:
             std::list<sstring> _segments_to_replay;
+            std::unordered_set<sstring> _segments_to_replay_set;
             replay_position _last_not_complete_rp;
             std::unordered_map<table_schema_version, column_mapping> _last_schema_ver_to_column_mapping;
             state_set _state;
@@ -175,6 +177,8 @@ public:
             future<> stop(drain should_drain) noexcept;
 
             /// \brief Add a new segment ready for sending.
+            ///
+            /// If the segment with given name is already enqueued for sending, then it does nothing.
             void add_segment(sstring seg_name);
 
             /// \brief Check if there are still unsent segments.
