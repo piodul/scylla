@@ -554,6 +554,8 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPAIR_GET_FULL_ROW_HASHES_WITH_RPC_STREAM:
     case messaging_verb::NODE_OPS_CMD:
     case messaging_verb::HINT_MUTATION:
+    case messaging_verb::HINT_SYNC_POINT_CREATE:
+    case messaging_verb::HINT_SYNC_POINT_CHECK:
         return 1;
     case messaging_verb::CLIENT_ID:
     case messaging_verb::MUTATION:
@@ -1496,6 +1498,26 @@ future<> messaging_service::send_hint_mutation(msg_addr id, clock_type::time_poi
         inet_address reply_to, unsigned shard, response_id_type response_id, std::optional<tracing::trace_info> trace_info) {
     return send_message_oneway_timeout(this, timeout, messaging_verb::HINT_MUTATION, std::move(id), fm, std::move(forward),
         std::move(reply_to), shard, std::move(response_id), std::move(trace_info));
+}
+
+void messaging_service::register_hint_sync_point_create(std::function<future<utils::UUID> (std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline)>&& func) {
+    register_handler(this, netw::messaging_verb::HINT_SYNC_POINT_CREATE, std::move(func));
+}
+future<> messaging_service::unregister_hint_sync_point_create() {
+    return unregister_handler(netw::messaging_verb::HINT_SYNC_POINT_CREATE);
+}
+future<utils::UUID> messaging_service::send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline) {
+    return send_message_timeout<future<utils::UUID>>(this, messaging_verb::HINT_SYNC_POINT_CREATE, std::move(id), timeout, std::move(target_endpoints), mark_deadline);
+}
+
+void messaging_service::register_hint_sync_point_check(std::function<future<bool> (rpc::opt_time_point timeout, utils::UUID mark_point_id)>&& func) {
+    register_handler(this, netw::messaging_verb::HINT_SYNC_POINT_CHECK, std::move(func));
+}
+future<> messaging_service::unregister_hint_sync_point_check() {
+    return unregister_handler(netw::messaging_verb::HINT_SYNC_POINT_CHECK);
+}
+future<bool> messaging_service::send_hint_sync_point_check(msg_addr id, clock_type::time_point timeout, utils::UUID mark_point_id) {
+    return send_message_timeout<future<bool>>(this, messaging_verb::HINT_SYNC_POINT_CHECK, std::move(id), timeout, mark_point_id);
 }
 
 void messaging_service::register_raft_send_snapshot(std::function<future<raft::snapshot_reply> (const rpc::client_info&, rpc::opt_time_point, uint64_t group_id, raft::server_id from_id, raft::server_id dst_id, raft::install_snapshot)>&& func) {
