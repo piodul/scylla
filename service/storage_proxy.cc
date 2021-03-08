@@ -5260,6 +5260,40 @@ const db::hints::host_filter& storage_proxy::get_hints_host_filter() const {
     return _hints_manager.get_host_filter();
 }
 
+future<utils::UUID> storage_proxy::create_hint_queue_sync_point(const std::vector<gms::inet_address>& endpoints, clock_type::time_point deadline) {
+    return container().invoke_on(0, [endpoints, deadline] (storage_proxy& sp) mutable {
+        auto id = utils::UUID_gen::get_time_UUID();
+        sp._hint_queue_checkpoints.emplace(id);
+        // Waited indirectly by keeping a pointer to the storage_proxy.
+        // When drain_on_shutdown is triggered, hints manager will report an error
+        // and this future will resolve.
+        (void)when_all(
+            sp._hints_manager.wait_until_hints_are_replayed(endpoints, deadline),
+            sp._hints_for_views_manager.wait_until_hints_are_replayed(endpoints, deadline)
+        ).then([&sp, id, guard = sp.shared_from_this()] (std::tuple<future<>, future<>>&& f_tup) {
+            auto handle_result = [id] (future<> f, sstring kind) {
+                if (!f.failed()) {
+                    slogger.debug("Hint sync point {} for {} reached", id, kind);
+                    f.get();
+                } else {
+                    slogger.debug("An error occured when waiting for hint sync point {} for {} to resolve: {}", id, kind, f.get_exception());
+                }
+            };
+            handle_result(std::move(std::get<0>(f_tup)), "hints manager");
+            handle_result(std::move(std::get<1>(f_tup)), "hints for views manager");
+            sp._hint_queue_checkpoints.erase(id);
+        });
+
+        return make_ready_future<utils::UUID>(id);
+    });
+}
+
+future<bool> storage_proxy::check_hint_queue_sync_point(utils::UUID sync_point) {
+    return container().invoke_on(0, [sync_point] (storage_proxy& sp) {
+        return !sp._hint_queue_checkpoints.contains(sync_point);
+    });
+}
+
 void storage_proxy::on_join_cluster(const gms::inet_address& endpoint) {};
 
 void storage_proxy::on_leave_cluster(const gms::inet_address& endpoint) {};
