@@ -488,6 +488,9 @@ public:
     void init_messaging_service();
     future<> uninit_messaging_service();
 
+    // `endpoints` may include the current node
+    future<> wait_for_hints_to_be_replayed(std::vector<gms::inet_address> endpoints);
+
 private:
     // Applies mutation on this node.
     // Resolves with timed_out_error when timeout is reached.
