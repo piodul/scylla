@@ -5144,6 +5144,14 @@ void storage_proxy::init_messaging_service() {
             });
         });
     });
+
+    ms.register_hint_sync_point_create([this] (std::vector<gms::inet_address> target_endpoints, clock_type::time_point deadline) {
+        return create_hint_queue_sync_point(target_endpoints, deadline);
+    });
+
+    ms.register_hint_sync_point_check([this] (rpc::opt_time_point timeout, utils::UUID mark_point_id) {
+        return check_hint_queue_sync_point(mark_point_id);
+    });
 }
 
 future<> storage_proxy::uninit_messaging_service() {
@@ -5161,7 +5169,9 @@ future<> storage_proxy::uninit_messaging_service() {
         ms.unregister_paxos_prepare(),
         ms.unregister_paxos_accept(),
         ms.unregister_paxos_learn(),
-        ms.unregister_paxos_prune()
+        ms.unregister_paxos_prune(),
+        ms.unregister_hint_sync_point_create(),
+        ms.unregister_hint_sync_point_check()
     ).discard_result();
 
 }
