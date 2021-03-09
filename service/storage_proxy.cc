@@ -97,6 +97,7 @@
 #include "service/paxos/proposal.hh"
 #include "locator/token_metadata.hh"
 #include "seastar/core/coroutine.hh"
+#include "seastar/core/with_timeout.hh"
 
 namespace bi = boost::intrusive;
 
@@ -5302,6 +5303,69 @@ future<bool> storage_proxy::check_hint_queue_sync_point(utils::UUID sync_point) 
     return container().invoke_on(0, [sync_point] (storage_proxy& sp) {
         return !sp._hint_queue_checkpoints.contains(sync_point);
     });
+}
+
+future<> storage_proxy::wait_for_hints_to_be_replayed(std::vector<gms::inet_address> endpoints) {
+    auto& db = _db.local();
+    const auto timeout_in_ms = db.get_config().wait_for_hint_replay_before_repair_in_ms();
+    if (timeout_in_ms <= 0) {
+        slogger.debug("wait_for_hint_replay_before_repair_in_ms is zero, so I'm not waiting for other nodes to replay their hints");
+        co_return;
+    }
+
+    const auto deadline = lowres_clock::now() + std::chrono::milliseconds(timeout_in_ms);
+
+    slogger.debug("Coordinating a request to wait until all hints are sent on {} nodes", endpoints.size());
+
+    co_await parallel_for_each(endpoints, [this, &endpoints_ = endpoints, deadline_ = deadline] (gms::inet_address addr) -> future<> {
+        const auto deadline = deadline_;
+        const auto& endpoints = endpoints_;
+
+        const std::chrono::seconds wait_duration{1};
+
+        // Step 1: Create a hint queue sync point
+        utils::UUID sync_point;
+        try {
+            sync_point = co_await _messaging.send_hint_sync_point_create({ addr, 0 }, deadline, endpoints, deadline);
+        } catch (...) {
+            slogger.debug("Failed to create a sync point for {}. I won't wait for hints to be replayed on this node");
+            throw;
+        }
+
+        // Step 2: Wait until hints are replayed
+        // Sleep 1 second between checks
+        bool reached_sync_point = false;
+        while (!reached_sync_point && lowres_clock::now() < deadline) {
+            slogger.debug("Waiting for all hints from endpoint {} to be sent out; remaining time: {}s, targets: {}",
+                    addr, std::chrono::duration_cast<std::chrono::seconds>(deadline - lowres_clock::now()).count(), endpoints);
+            try {
+                reached_sync_point = co_await _messaging.send_hint_sync_point_check({ addr, 0 }, deadline, sync_point);
+                if (reached_sync_point) {
+                    break;
+                }
+            } catch (rpc::timeout_error&) {
+                slogger.debug("Caught a timeout error while sending hint queue query at {}", addr);
+                // RPC timeout should be set to the deadline, so we can assume here that the deadline is reached
+                break;
+            } catch (rpc::closed_error&) {
+                slogger.debug("Caught a connection closed error while sending hint queue query at {}", addr);
+            } catch (...) {
+                slogger.debug("Caught an unexpected error while sending hint queue query at {}: {}. Won't wait anymore", addr, std::current_exception());
+                throw;
+            }
+
+            co_await sleep_abortable(wait_duration);
+        }
+
+        if (reached_sync_point) {
+            slogger.debug("Finished waiting for all hints from endpoint {} to be sent out - all segments waited on were sent", addr);
+        } else {
+            slogger.debug("Finished waiting for all hints from endpoint {} to be sent out - stopped waiting before all segments were sent", addr);
+        }
+        co_return;
+    });
+
+    co_return;
 }
 
 void storage_proxy::on_join_cluster(const gms::inet_address& endpoint) {};
