@@ -30,6 +30,7 @@
 #include "streaming/stream_reason.hh"
 #include "gms/inet_address.hh"
 #include "service/storage_service.hh"
+#include "service/storage_proxy.hh"
 #include "service/priority_manager.hh"
 #include "message/messaging_service.hh"
 #include "sstables/sstables.hh"
@@ -1365,6 +1366,18 @@ static future<> repair_ranges(lw_shared_ptr<repair_info> ri) {
     });
 }
 
+static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector<gms::inet_address> nodes) {
+    auto& sp = service::get_local_storage_proxy();
+    rlogger.info("repair id {}: started replaying hints before repair, nodes: {}", id, nodes);
+    try {
+        co_await sp.wait_for_hints_to_be_replayed(std::move(nodes));
+        rlogger.info("repair id {}: finished replaying hints, continuing with repair", id);
+    } catch (...) {
+        rlogger.warn("repair id {}: failed to replay hints before repair: {}, the repair will continue", id, std::current_exception());
+    }
+    co_return;
+}
+
 // repair_start() can run on any cpu; It runs on cpu0 the function
 // do_repair_start(). The benefit of always running that function on the same
 // CPU is that it allows us to keep some state (like a list of ongoing
@@ -1465,6 +1478,10 @@ static int do_repair_start(seastar::sharded<database>& db, seastar::sharded<netw
     // Do it in the background.
     (void)repair_tracker().run(id, [&db, &ms, id, keyspace = std::move(keyspace),
             cfs = std::move(cfs), ranges = std::move(ranges), options = std::move(options), ignore_nodes = std::move(ignore_nodes)] () mutable {
+
+        auto participants = options.get_participating_hosts(db.local());
+        try_wait_for_hints_to_be_replayed(id, std::move(participants)).get();
+
         std::vector<future<>> repair_results;
         repair_results.reserve(smp::count);
         auto table_ids = get_table_ids(db.local(), keyspace, cfs);
