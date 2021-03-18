@@ -1221,7 +1221,7 @@ for mode in modes:
 
 linker_flags = linker_flags(compiler=args.cxx)
 
-dbgflag = '-g -gz' if args.debuginfo else ''
+dbgflag = '-g' if args.debuginfo else ''
 tests_link_rule = 'link' if args.tests_debuginfo else 'link_stripped'
 
 # Strip if debuginfo is disabled, otherwise we end up with partial
@@ -1339,7 +1339,7 @@ for m in ['debug', 'release', 'sanitize', 'dev']:
     cxxflags = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\"\" -DSCYLLA_RELEASE=\"\\\"" + scylla_release + "\\\"\" -DSCYLLA_BUILD_MODE=\"\\\"" + m + "\\\"\""
     extra_cxxflags[m]["release.cc"] = cxxflags
 
-for m in ['debug', 'release', 'sanitize']:
+for m in ['debug', 'dev', 'release', 'sanitize']:
     modes[m]['cxxflags'] += ' ' + dbgflag
 
 # The relocatable package includes its own dynamic linker. We don't

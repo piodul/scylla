@@ -577,6 +577,11 @@ future<> maybe_rewrite_streams_descriptions(
         co_return co_await db::system_keyspace::cdc_set_rewritten(std::nullopt);
     }
 
+    // Introduce a sleep so that we can test scylla-cdc-go
+    cdc_log.info("Entering sleep (120 seconds) before starting to rewrite generations...");
+    co_await sleep_abortable(std::chrono::seconds(120), abort_src);
+    cdc_log.info("Continuing with rewriting generations");
+
     // It's safe to discard this future: the coroutine keeps system_distributed_keyspace alive
     // and the abort source's lifetime extends the lifetime of any other service.
     (void)(([_times_and_ttls = std::move(times_and_ttls), _sys_dist_ks = std::move(sys_dist_ks),
