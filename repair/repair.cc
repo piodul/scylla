@@ -1262,6 +1262,60 @@ private:
         boost::split(var, it->second, boost::algorithm::is_any_of(","));
         options.erase(it);
     }
+
+public:
+    // Returns a list of hosts participating in repair
+    std::vector<gms::inet_address> get_participating_hosts(const database& db) const {
+        auto make_address = [] (const sstring& host) -> gms::inet_address {
+            try {
+                return gms::inet_address(host);
+            } catch(...) {
+                throw std::runtime_error(format("Unknown host specified: {}", host));
+            }
+        };
+
+        std::vector<gms::inet_address> ret;
+
+        if (!hosts.empty()) {
+            ret.reserve(hosts.size());
+            for (const auto& s : hosts) {
+                ret.emplace_back(make_address(s));
+            }
+            return ret;
+        }
+
+        const auto& meta = db.get_token_metadata();
+
+        if (!data_centers.empty()) {
+            const auto& eps_per_dc = meta.get_topology().get_datacenter_endpoints();
+            for (const auto& dc : data_centers) {
+                const auto it = eps_per_dc.find(dc);
+                if (it == eps_per_dc.end()) {
+                    std::vector<sstring> dcs;
+                    for (const auto& e : eps_per_dc) {
+                        dcs.push_back(e.first);
+                    }
+                    throw std::runtime_error(sprint("Unknown data center '%s'. "
+                            "Known data centers: %s", dc, dcs));
+                }
+                const auto& eps = it->second;
+                std::copy(eps.begin(), eps.end(), std::back_inserter(ret));
+            }
+            return ret;
+        }
+
+        ret = meta.get_all_endpoints();
+
+        if (!ignore_nodes.empty()) {
+            std::unordered_set<gms::inet_address> ignored_set;
+            for (const auto& s : ignore_nodes) {
+                ignored_set.emplace(make_address(s));
+            }
+            std::erase_if(ret, [&] (const auto& s) { return ignored_set.contains(s); });
+        }
+
+        return ret;
+    }
 };
 
 
