@@ -489,7 +489,7 @@ public:
     future<> uninit_messaging_service();
 
     // `endpoints` may include the current node
-    future<> wait_for_hints_to_be_replayed(std::vector<gms::inet_address> endpoints);
+    future<> wait_for_hints_to_be_replayed(std::vector<gms::inet_address> endpoints, seastar::abort_source& as);
 
 private:
     // Applies mutation on this node.
