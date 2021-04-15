@@ -204,7 +204,7 @@ public:
             /// \return TRUE if there are still unsent segments.
             bool have_segments() const noexcept { return !_segments_to_replay.empty(); };
 
-            /// \brief Waits until all current hints on disk for this endpoints are replayed or the timeout is reached.
+            /// \brief Waits until all current hints on disk for this endpoints are replayed, timeout is reached or hint replay becomes stuck.
             future<> wait_until_hints_are_replayed(time_point_type timeout = time_point_type::max());
 
         private:
@@ -316,6 +316,9 @@ public:
 
             /// Notifies waiters from the _segment_waiters list.
             void notify_segment_waiters();
+
+            /// Dismisses all current _segment_waiters with given exception
+            void dismiss_all_segment_waiters(std::exception_ptr ep);
         };
 
     private:

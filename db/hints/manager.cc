@@ -684,11 +684,8 @@ future<> manager::end_point_hints_manager::sender::stop(drain should_drain) noex
         }
 
         // Dismiss all segment waiters with an error
-        while (!_segment_waiters.empty()) {
-            seastar::thread::maybe_yield();
-            _segment_waiters.front().pr.set_exception(std::runtime_error("hints manager is stopped"));
-            _segment_waiters.pop_front();
-        }
+        auto ep = std::make_exception_ptr(std::runtime_error("hints manager is stopped"));
+        dismiss_all_segment_waiters(std::move(ep));
 
         manager_logger.trace("ep_manager({})::sender: exiting", end_point_key());
     });
@@ -755,6 +752,13 @@ manager::end_point_hints_manager::sender::clock::duration manager::end_point_hin
 void manager::end_point_hints_manager::sender::notify_segment_waiters() {
     while (!_segment_waiters.empty() && _segment_waiters.front().target_segment_count <= _total_replayed_segments_count) {
         _segment_waiters.front().pr.set_value();
+        _segment_waiters.pop_front();
+    }
+}
+
+void manager::end_point_hints_manager::sender::dismiss_all_segment_waiters(std::exception_ptr ep) {
+    while (!_segment_waiters.empty()) {
+        _segment_waiters.front().pr.set_exception(ep);
         _segment_waiters.pop_front();
     }
 }
@@ -932,6 +936,15 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
             manager_logger.debug("send_hints(): replayed {} segments towards {} so far", _total_replayed_segments_count, end_point_key());
 
             notify_segment_waiters();
+        }
+
+        // If something blocks us and we cannot send hints now (e.g. destination is DOWN),
+        // then it's better to dismiss anybody who waits for hints to be replayed,
+        // because we don't know how much time it will take until we get unblocked.
+        // In such case, dismiss any segment waiters.
+        if (!can_send() && !_segment_waiters.empty()) {
+            auto ep = std::runtime_error(format("hint replay failed: cannot currently send to destination {}", end_point_key()));
+            dismiss_all_segment_waiters(std::make_exception_ptr(std::move(ep)));
         }
 
     // Ignore exceptions, we will retry sending this file from where we left off the next time.
