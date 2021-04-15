@@ -1370,7 +1370,8 @@ static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector
     auto& sp = service::get_local_storage_proxy();
     rlogger.info("repair id {}: started replaying hints before repair, nodes: {}", id, nodes);
     try {
-        co_await sp.wait_for_hints_to_be_replayed(std::move(nodes));
+        seastar::abort_source as;
+        co_await sp.wait_for_hints_to_be_replayed(std::move(nodes), as);
         rlogger.info("repair id {}: finished replaying hints, continuing with repair", id);
     } catch (...) {
         rlogger.warn("repair id {}: failed to replay hints before repair: {}, the repair will continue", id, std::current_exception());
