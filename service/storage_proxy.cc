@@ -5347,10 +5347,17 @@ future<> storage_proxy::wait_for_hints_to_be_replayed(std::vector<gms::inet_addr
 
             if (wait_until == deadline) {
                 // We arrived at the deadline - stop
+                slogger.debug("Reached the deadline while waiting for hint sync point at {}", addr);
                 break;
             }
             now = lowres_clock::now();
             next_try_time = now + retry_interval;
+
+            // Check if the destination is alive
+            if (!gms::get_local_gossiper().is_alive(addr)) {
+                slogger.debug("Node {} is no longer alive, won't wait anymore for its hint sync point", addr);
+                break;
+            }
 
             slogger.debug("Waiting for all hints from endpoint {} to be sent out; remaining time: {}s, targets: {}",
                     addr, std::chrono::duration_cast<std::chrono::seconds>(deadline - now).count(), endpoints);
@@ -5371,7 +5378,7 @@ future<> storage_proxy::wait_for_hints_to_be_replayed(std::vector<gms::inet_addr
         if (reached_sync_point) {
             slogger.debug("Finished waiting for all hints from endpoint {} to be sent out - all segments waited on were sent", addr);
         } else {
-            slogger.debug("Finished waiting for all hints from endpoint {} to be sent out - deadline exceeded", addr);
+            slogger.debug("Finished waiting for all hints from endpoint {} to be sent out - wait was interrupted", addr);
         }
         co_return;
     });
