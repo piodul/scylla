@@ -5150,7 +5150,7 @@ void storage_proxy::init_messaging_service() {
         return create_hint_queue_sync_point(target_endpoints, deadline);
     });
 
-    ms.register_hint_sync_point_check([this] (rpc::opt_time_point timeout, utils::UUID mark_point_id) {
+    ms.register_hint_sync_point_check([this] (utils::UUID mark_point_id) {
         return check_hint_queue_sync_point(mark_point_id);
     });
 }

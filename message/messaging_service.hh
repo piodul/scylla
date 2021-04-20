@@ -561,7 +561,7 @@ public:
     future<> unregister_hint_sync_point_create();
     future<utils::UUID> send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline);
 
-    void register_hint_sync_point_check(std::function<future<bool> (rpc::opt_time_point timeout, utils::UUID mark_point_id)>&& func);
+    void register_hint_sync_point_check(std::function<future<bool> (utils::UUID mark_point_id)>&& func);
     future<> unregister_hint_sync_point_check();
     future<bool> send_hint_sync_point_check(msg_addr id, clock_type::time_point timeout, utils::UUID mark_point_id);
 

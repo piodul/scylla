@@ -1510,7 +1510,7 @@ future<utils::UUID> messaging_service::send_hint_sync_point_create(msg_addr id, 
     return send_message_timeout<future<utils::UUID>>(this, messaging_verb::HINT_SYNC_POINT_CREATE, std::move(id), timeout, std::move(target_endpoints), mark_deadline);
 }
 
-void messaging_service::register_hint_sync_point_check(std::function<future<bool> (rpc::opt_time_point timeout, utils::UUID mark_point_id)>&& func) {
+void messaging_service::register_hint_sync_point_check(std::function<future<bool> (utils::UUID mark_point_id)>&& func) {
     register_handler(this, netw::messaging_verb::HINT_SYNC_POINT_CHECK, std::move(func));
 }
 future<> messaging_service::unregister_hint_sync_point_check() {
