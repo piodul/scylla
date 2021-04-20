@@ -1377,9 +1377,9 @@ static future<> repair_ranges(lw_shared_ptr<repair_info> ri) {
     });
 }
 
-static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector<gms::inet_address> nodes) {
+static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector<gms::inet_address> source_nodes, std::vector<gms::inet_address> target_nodes) {
     auto& sp = service::get_local_storage_proxy();
-    rlogger.info("repair id {}: started replaying hints before repair, nodes: {}", id, nodes);
+    rlogger.info("repair id {}: started replaying hints before repair, target nodes: {}", id, target_nodes);
     try {
         seastar::abort_source combined_as;
         auto attach = [&] (seastar::abort_source& as) {
@@ -1394,7 +1394,7 @@ static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector
         const auto shutdown_sub = attach(repair_tracker().get_shutdown_abort_source());
         const auto abort_all_sub = attach(repair_tracker().get_abort_all_abort_source());
 
-        co_await sp.wait_for_hints_to_be_replayed(std::move(nodes), combined_as);
+        co_await sp.wait_for_hints_to_be_replayed(std::move(source_nodes), std::move(target_nodes), combined_as);
         rlogger.info("repair id {}: finished replaying hints, continuing with repair", id);
     } catch (...) {
         rlogger.warn("repair id {}: failed to replay hints before repair: {}, the repair will continue", id, std::current_exception());
@@ -1504,7 +1504,8 @@ static int do_repair_start(seastar::sharded<database>& db, seastar::sharded<netw
             cfs = std::move(cfs), ranges = std::move(ranges), options = std::move(options), ignore_nodes = std::move(ignore_nodes)] () mutable {
 
         auto participants = options.get_participating_hosts(db.local());
-        try_wait_for_hints_to_be_replayed(id, std::move(participants)).get();
+        auto all_nodes = db.local().get_token_metadata().get_all_endpoints();
+        try_wait_for_hints_to_be_replayed(id, std::move(all_nodes), std::move(participants)).get();
 
         std::vector<future<>> repair_results;
         repair_results.reserve(smp::count);
