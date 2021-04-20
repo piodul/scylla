@@ -1394,7 +1394,7 @@ static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector
         const auto shutdown_sub = attach(repair_tracker().get_shutdown_abort_source());
         const auto abort_all_sub = attach(repair_tracker().get_abort_all_abort_source());
 
-        co_await sp.wait_for_hints_to_be_replayed(std::move(source_nodes), std::move(target_nodes), combined_as);
+        co_await sp.wait_for_hints_to_be_replayed(id.uuid, std::move(source_nodes), std::move(target_nodes), combined_as);
         rlogger.info("repair id {}: finished replaying hints, continuing with repair", id);
     } catch (...) {
         rlogger.warn("repair id {}: failed to replay hints before repair: {}, the repair will continue", id, std::current_exception());

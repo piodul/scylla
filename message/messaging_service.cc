@@ -1500,14 +1500,14 @@ future<> messaging_service::send_hint_mutation(msg_addr id, clock_type::time_poi
         std::move(reply_to), shard, std::move(response_id), std::move(trace_info));
 }
 
-void messaging_service::register_hint_sync_point_create(std::function<future<utils::UUID> (std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline)>&& func) {
+void messaging_service::register_hint_sync_point_create(std::function<future<> (utils::UUID sync_point_id, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline)>&& func) {
     register_handler(this, netw::messaging_verb::HINT_SYNC_POINT_CREATE, std::move(func));
 }
 future<> messaging_service::unregister_hint_sync_point_create() {
     return unregister_handler(netw::messaging_verb::HINT_SYNC_POINT_CREATE);
 }
-future<utils::UUID> messaging_service::send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline) {
-    return send_message_timeout<future<utils::UUID>>(this, messaging_verb::HINT_SYNC_POINT_CREATE, std::move(id), timeout, std::move(target_endpoints), mark_deadline);
+future<> messaging_service::send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, utils::UUID sync_point_id, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline) {
+    return send_message_timeout<future<>>(this, messaging_verb::HINT_SYNC_POINT_CREATE, std::move(id), timeout, sync_point_id, std::move(target_endpoints), mark_deadline);
 }
 
 void messaging_service::register_hint_sync_point_check(std::function<future<bool> (utils::UUID mark_point_id)>&& func) {

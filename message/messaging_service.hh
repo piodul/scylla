@@ -557,9 +557,9 @@ public:
     future<> send_hint_mutation(msg_addr id, clock_type::time_point timeout, const frozen_mutation& fm, std::vector<inet_address> forward,
         inet_address reply_to, unsigned shard, response_id_type response_id, std::optional<tracing::trace_info> trace_info = std::nullopt);
 
-    void register_hint_sync_point_create(std::function<future<utils::UUID> (std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline)>&& func);
+    void register_hint_sync_point_create(std::function<future<> (utils::UUID sync_point_id, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline)>&& func);
     future<> unregister_hint_sync_point_create();
-    future<utils::UUID> send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline);
+    future<> send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, utils::UUID sync_point_id, std::vector<gms::inet_address> target_endpoints, clock_type::time_point mark_deadline);
 
     void register_hint_sync_point_check(std::function<future<bool> (utils::UUID mark_point_id)>&& func);
     future<> unregister_hint_sync_point_check();
