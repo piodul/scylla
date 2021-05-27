@@ -1551,26 +1551,6 @@ future<> messaging_service::send_raft_timeout_now(msg_addr id, clock_type::time_
 }
 
 
-void messaging_service::register_hint_sync_point_create(std::function<future<db::hints::sync_point_create_response> (db::hints::sync_point_create_request request)>&& func) {
-    register_handler(this, netw::messaging_verb::HINT_SYNC_POINT_CREATE, std::move(func));
-}
-future<> messaging_service::unregister_hint_sync_point_create() {
-    return unregister_handler(netw::messaging_verb::HINT_SYNC_POINT_CREATE);
-}
-future<db::hints::sync_point_create_response> messaging_service::send_hint_sync_point_create(msg_addr id, clock_type::time_point timeout, db::hints::sync_point_create_request request) {
-    return send_message_timeout<future<db::hints::sync_point_create_response>>(this, messaging_verb::HINT_SYNC_POINT_CREATE, std::move(id), timeout, std::move(request));
-}
-
-void messaging_service::register_hint_sync_point_check(std::function<future<db::hints::sync_point_check_response> (db::hints::sync_point_check_request request)>&& func) {
-    register_handler(this, netw::messaging_verb::HINT_SYNC_POINT_CHECK, std::move(func));
-}
-future<> messaging_service::unregister_hint_sync_point_check() {
-    return unregister_handler(netw::messaging_verb::HINT_SYNC_POINT_CHECK);
-}
-future<db::hints::sync_point_check_response> messaging_service::send_hint_sync_point_check(msg_addr id, clock_type::time_point timeout, db::hints::sync_point_check_request request) {
-    return send_message_timeout<future<db::hints::sync_point_check_response>>(this, messaging_verb::HINT_SYNC_POINT_CHECK, std::move(id), timeout, std::move(request));
-}
-
 void init_messaging_service(sharded<messaging_service>& ms,
                 messaging_service::config mscfg, netw::messaging_service::scheduling_config scfg,
                 sstring ms_trust_store, sstring ms_cert, sstring ms_key, sstring ms_tls_prio, bool ms_client_auth) {
