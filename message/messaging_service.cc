@@ -66,7 +66,6 @@
 #include "idl/messaging_service.dist.hh"
 #include "idl/paxos.dist.hh"
 #include "idl/raft.dist.hh"
-#include "idl/hinted_handoff.dist.hh"
 #include "serializer_impl.hh"
 #include "serialization_visitors.hh"
 #include "idl/consistency_level.dist.impl.hh"
@@ -90,7 +89,6 @@
 #include "idl/messaging_service.dist.impl.hh"
 #include "idl/paxos.dist.impl.hh"
 #include "idl/raft.dist.impl.hh"
-#include "idl/hinted_handoff.dist.impl.hh"
 #include <seastar/rpc/lz4_compressor.hh>
 #include <seastar/rpc/lz4_fragmented_compressor.hh>
 #include <seastar/rpc/multi_algo_compressor_factory.hh>
@@ -565,8 +563,6 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPAIR_GET_FULL_ROW_HASHES_WITH_RPC_STREAM:
     case messaging_verb::NODE_OPS_CMD:
     case messaging_verb::HINT_MUTATION:
-    case messaging_verb::HINT_SYNC_POINT_CREATE:
-    case messaging_verb::HINT_SYNC_POINT_CHECK:
         return 1;
     case messaging_verb::CLIENT_ID:
     case messaging_verb::MUTATION:
