@@ -134,6 +134,20 @@ public:
                 void on_hint_send_failure(db::replay_position rp) noexcept;
             };
 
+            class concurrency_limiter {
+            private:
+                seastar::semaphore _sem;
+                size_t _current_limit;
+                const size_t _max_limit;
+
+            public:
+                concurrency_limiter(size_t max_limit);
+
+                future<semaphore_units> get_units_for_sending(size_t size);
+                void account_successful_write(size_t size);
+                future<> account_failed_sending_operation();
+            };
+
         private:
             std::list<sstring> _segments_to_replay;
             replay_position _last_not_complete_rp;
@@ -152,6 +166,8 @@ public:
             gms::gossiper& _gossiper;
             seastar::shared_mutex& _file_update_mutex;
             uint64_t _total_replayed_segments_count = 0;
+
+            concurrency_limiter _concurrency_limiter;
 
             struct segment_waiter {
                 const uint64_t target_segment_count;

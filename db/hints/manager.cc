@@ -979,6 +979,35 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
     manager_logger.trace("send_hints(): we handled {} segments", replayed_segments_count);
 }
 
+manager::end_point_hints_manager::sender::concurrency_limiter::concurrency_limiter(size_t max_limit)
+        : _sem(max_limit)
+        , _current_limit(max_limit)
+        , _max_limit(max_limit) {
+}
+
+future<semaphore_units> manager::end_point_hints_manager::sender::concurrency_limiter::get_units_for_sending(size_t size) {
+    size = std::min(size, _current_limit);
+    return get_units(_sem, size);
+}
+
+void manager::end_point_hints_manager::sender::concurrency_limiter::account_successful_write(size_t size) {
+    const size_t new_limit = std::min(_max_limit, _current_limit + size);
+    const size_t increase = new_limit - _current_limit;
+    if (increase > 0) {
+        _current_limit = new_limit;
+        _sem.signal(increase);
+    }
+}
+
+future<> manager::end_point_hints_manager::sender::concurrency_limiter::account_failed_sending_operation() {
+    // This function must not be called if there is anybody waiting or holding the units
+    assert(_sem.waiters() == 0 && _sem.available_units() == _current_limit);
+
+    const size_t new_limit = std::max(1, _current_limit / 2);
+    _sem.consume(_current_limit - new_limit);
+    _current_limit = new_limit;
+}
+
 static future<> scan_for_hints_dirs(const sstring& hints_directory, std::function<future<> (fs::path dir, directory_entry de, unsigned shard_id)> f) {
     return lister::scan_dir(hints_directory, { directory_entry_type::directory }, [f = std::move(f)] (fs::path dir, directory_entry de) mutable {
         unsigned shard_id;
