@@ -857,6 +857,7 @@ scylla_core = (['database.cc',
                 'db/hints/manager.cc',
                 'db/hints/resource_manager.cc',
                 'db/hints/host_filter.cc',
+                'db/hints/sync_point.cc',
                 'db/config.cc',
                 'db/extensions.cc',
                 'db/heat_load_balance.cc',
@@ -1095,6 +1096,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/messaging_service.idl.hh',
         'idl/paxos.idl.hh',
         'idl/raft.idl.hh',
+        'idl/hinted_handoff.idl.hh',
         ]
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
