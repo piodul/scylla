@@ -27,6 +27,7 @@
 #include <list>
 #include <chrono>
 #include <optional>
+#include <random>
 #include <seastar/core/gate.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/timer.hh>
@@ -143,9 +144,13 @@ public:
             public:
                 concurrency_limiter(size_t max_limit);
 
-                future<semaphore_units> get_units_for_sending(size_t size);
+                future<semaphore_units<>> get_units_for_sending(size_t size);
                 void account_successful_write(size_t size);
-                future<> account_failed_sending_operation();
+                void account_failed_sending_operation();
+
+                bool reached_minimum() const {
+                    return _current_limit == 1;
+                }
             };
 
         private:
@@ -547,6 +552,8 @@ private:
     std::unordered_set<ep_key_type> _eps_with_pending_hints;
     seastar::named_semaphore _drain_lock = {1, named_semaphore_exception_factory{"drain lock"}};
 
+    std::default_random_engine _random_engine{std::random_device{}()};
+
 public:
     manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<database>& db);
     virtual ~manager();
@@ -756,6 +763,10 @@ private:
 
     end_point_hints_manager& get_ep_manager(ep_key_type ep);
     bool have_ep_manager(ep_key_type ep) const noexcept;
+
+    std::default_random_engine& get_random_engine() {
+        return _random_engine;
+    }
 
 public:
     /// \brief Initiate the draining when we detect that the node has left the cluster.

@@ -200,6 +200,10 @@ public:
     /// The hints::managers can be added either before or after resource_manager starts.
     /// If resource_manager is already started, the hints manager will also be started.
     future<> register_manager(manager& m);
+
+    size_t get_max_send_in_flight_memory() const {
+        return _max_send_in_flight_memory;
+    }
 };
 
 }
