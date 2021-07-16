@@ -27,12 +27,14 @@
 #include <list>
 #include <chrono>
 #include <optional>
+#include <random>
 #include <seastar/core/gate.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/shared_mutex.hh>
 #include <seastar/core/expiring_fifo.hh>
+#include <seastar/core/abort_source.hh>
 #include "gms/gossiper.hh"
 #include "locator/snitch_base.hh"
 #include "inet_address_vectors.hh"
@@ -75,6 +77,34 @@ public:
     future<> ensure_rebalanced();
 };
 
+/// A helper class, intended to limit the concurrency of sending hints on a single hints sender.
+/// See descriptions of `create_*` functions for more details about the available algorithms.
+class concurrency_limiter {
+public:
+    virtual ~concurrency_limiter() {}
+
+    virtual future<semaphore_units<>> get_units_for_sending(size_t size) = 0;
+    virtual void account_successful_write(size_t size) = 0;
+    virtual future<> account_failed_sending_operation() = 0;
+
+    virtual bool reached_minimum() const = 0;
+
+    // Additive increase, multiplicative decrease.
+    // The limiter will measure the concurrency in bytes.
+    // Every time a hint is successfully sent, the concurrency
+    // will increase by the mutation's size.
+    // If hint sending operation fails, the concurrency is halved.
+    static seastar::shared_ptr<concurrency_limiter> create_aimd(size_t memory_limit);
+
+    // The limiter won't apply any limits.
+    // Hint sending concurrency will still be bounded
+    // by resource_manager (10% of shard's memory + configured
+    // max concurrency).
+    static seastar::shared_ptr<concurrency_limiter> create_noop();
+};
+
+using concurrency_limiter_factory_fn = std::function<seastar::shared_ptr<concurrency_limiter>()>;
+
 class manager {
 private:
     struct stats {
@@ -85,6 +115,7 @@ private:
         uint64_t sent = 0;
         uint64_t discarded = 0;
         uint64_t corrupted_files = 0;
+        uint64_t sent_files = 0;
     };
 
     // map: shard -> segments
@@ -153,6 +184,10 @@ public:
             seastar::shared_mutex& _file_update_mutex;
             uint64_t _total_replayed_segments_count = 0;
 
+            seastar::shared_ptr<concurrency_limiter> _concurrency_limiter;
+
+            abort_source _as;
+
             struct segment_waiter {
                 const uint64_t target_segment_count;
                 promise<> pr;
@@ -170,7 +205,8 @@ public:
             seastar::expiring_fifo<segment_waiter, segment_waiter::expirer, timer_clock_type> _segment_waiters;
 
         public:
-            sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, database& local_db, gms::gossiper& local_gossiper) noexcept;
+            sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, database& local_db, gms::gossiper& local_gossiper,
+                    seastar::shared_ptr<concurrency_limiter> concurrency_limiter) noexcept;
 
             /// \brief A constructor that should be called from the copy/move-constructor of end_point_hints_manager.
             ///
@@ -349,7 +385,7 @@ public:
         sender _sender;
 
     public:
-        end_point_hints_manager(const key_type& key, manager& shard_manager);
+        end_point_hints_manager(const key_type& key, manager& shard_manager, seastar::shared_ptr<concurrency_limiter> concurrency_limiter);
         end_point_hints_manager(end_point_hints_manager&&);
         ~end_point_hints_manager();
 
@@ -531,8 +567,12 @@ private:
     std::unordered_set<ep_key_type> _eps_with_pending_hints;
     seastar::named_semaphore _drain_lock = {1, named_semaphore_exception_factory{"drain lock"}};
 
+    std::default_random_engine _random_engine{std::random_device{}()};
+    concurrency_limiter_factory_fn _concurrency_limiter_factory;
+
 public:
-    manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<database>& db);
+    manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<database>& db,
+            concurrency_limiter_factory_fn concurrency_limiter_factory);
     virtual ~manager();
     manager(manager&&) = delete;
     manager& operator=(manager&&) = delete;
@@ -740,6 +780,10 @@ private:
 
     end_point_hints_manager& get_ep_manager(ep_key_type ep);
     bool have_ep_manager(ep_key_type ep) const noexcept;
+
+    std::default_random_engine& get_random_engine() {
+        return _random_engine;
+    }
 
 public:
     /// \brief Initiate the draining when we detect that the node has left the cluster.

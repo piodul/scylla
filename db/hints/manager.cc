@@ -26,6 +26,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/rwlock.hh>
 #include <boost/range/adaptors.hpp>
 #include "utils/div_ceil.hh"
 #include "db/extensions.hh"
@@ -55,13 +56,15 @@ const std::string manager::FILENAME_PREFIX("HintsLog" + commitlog::descriptor::S
 const std::chrono::seconds manager::hint_file_write_timeout = std::chrono::seconds(2);
 const std::chrono::seconds manager::hints_flush_period = std::chrono::seconds(10);
 
-manager::manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager& res_manager, distributed<database>& db)
+manager::manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager& res_manager, distributed<database>& db,
+        concurrency_limiter_factory_fn concurrency_limiter_factory)
     : _hints_dir(fs::path(hints_directory) / format("{:d}", this_shard_id()))
     , _host_filter(std::move(filter))
     , _local_snitch_ptr(locator::i_endpoint_snitch::get_local_snitch_ptr())
     , _max_hint_window_us(max_hint_window_ms * 1000)
     , _local_db(db.local())
     , _resource_manager(res_manager)
+    , _concurrency_limiter_factory(std::move(concurrency_limiter_factory))
 {}
 
 manager::~manager() {
@@ -92,6 +95,9 @@ void manager::register_metrics(const sstring& group_name) {
 
         sm::make_derive("corrupted_files", _stats.corrupted_files,
                         sm::description("Number of hints files that were discarded during sending because the file was corrupted.")),
+
+        sm::make_derive("sent_files", _stats.sent_files,
+                        sm::description("Number of sent hint files")),
 
         sm::make_gauge("pending_drains", 
                         sm::description("Number of tasks waiting in the queue for draining hints"),
@@ -250,14 +256,14 @@ future<> manager::end_point_hints_manager::stop(drain should_drain) noexcept {
     });
 }
 
-manager::end_point_hints_manager::end_point_hints_manager(const key_type& key, manager& shard_manager)
+manager::end_point_hints_manager::end_point_hints_manager(const key_type& key, manager& shard_manager, seastar::shared_ptr<concurrency_limiter> concurrency_limiter)
     : _key(key)
     , _shard_manager(shard_manager)
     , _file_update_mutex_ptr(make_lw_shared<seastar::shared_mutex>())
     , _file_update_mutex(*_file_update_mutex_ptr)
     , _state(state_set::of<state::stopped>())
     , _hints_dir(_shard_manager.hints_dir() / format("{}", _key).c_str())
-    , _sender(*this, _shard_manager.local_storage_proxy(), _shard_manager.local_db(), _shard_manager.local_gossiper())
+    , _sender(*this, _shard_manager.local_storage_proxy(), _shard_manager.local_db(), _shard_manager.local_gossiper(), std::move(concurrency_limiter))
 {}
 
 manager::end_point_hints_manager::end_point_hints_manager(end_point_hints_manager&& other)
@@ -291,7 +297,7 @@ manager::end_point_hints_manager& manager::get_ep_manager(ep_key_type ep) {
     auto it = find_ep_manager(ep);
     if (it == ep_managers_end()) {
         manager_logger.trace("Creating an ep_manager for {}", ep);
-        manager::end_point_hints_manager& ep_man = _ep_managers.emplace(ep, end_point_hints_manager(ep, *this)).first->second;
+        manager::end_point_hints_manager& ep_man = _ep_managers.emplace(ep, end_point_hints_manager(ep, *this, _concurrency_limiter_factory())).first->second;
         ep_man.start();
         return ep_man;
     }
@@ -624,7 +630,8 @@ void manager::drain_for(gms::inet_address endpoint) {
     });
 }
 
-manager::end_point_hints_manager::sender::sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, database& local_db, gms::gossiper& local_gossiper) noexcept
+manager::end_point_hints_manager::sender::sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, database& local_db, gms::gossiper& local_gossiper,
+        seastar::shared_ptr<concurrency_limiter> concurrency_limiter) noexcept
     : _stopped(make_ready_future<>())
     , _ep_key(parent.end_point_key())
     , _ep_manager(parent)
@@ -635,6 +642,7 @@ manager::end_point_hints_manager::sender::sender(end_point_hints_manager& parent
     , _hints_cpu_sched_group(_db.get_streaming_scheduling_group())
     , _gossiper(local_gossiper)
     , _file_update_mutex(_ep_manager.file_update_mutex())
+    , _concurrency_limiter(std::move(concurrency_limiter))
 {}
 
 manager::end_point_hints_manager::sender::sender(const sender& other, end_point_hints_manager& parent) noexcept
@@ -648,12 +656,14 @@ manager::end_point_hints_manager::sender::sender(const sender& other, end_point_
     , _hints_cpu_sched_group(other._hints_cpu_sched_group)
     , _gossiper(other._gossiper)
     , _file_update_mutex(_ep_manager.file_update_mutex())
+    , _concurrency_limiter(other._concurrency_limiter)
 {}
 
 
 future<> manager::end_point_hints_manager::sender::stop(drain should_drain) noexcept {
     return seastar::async([this, should_drain] {
         set_stopping();
+        _as.request_abort();
         _stopped.get();
 
         if (should_drain == drain::yes) {
@@ -789,7 +799,7 @@ void manager::end_point_hints_manager::sender::start() {
 
                 // If we got here means that either there are no more hints to send or we failed to send hints we have.
                 // In both cases it makes sense to wait a little before continuing.
-                sleep_abortable(next_sleep_duration()).get();
+                sleep_abortable(next_sleep_duration(), _as).get();
             } catch (seastar::sleep_aborted&) {
                 break;
             } catch (...) {
@@ -811,10 +821,12 @@ future<> manager::end_point_hints_manager::sender::send_one_mutation(frozen_muta
 
 future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<send_one_file_ctx> ctx_ptr, fragmented_temporary_buffer buf, db::replay_position rp, gc_clock::duration secs_since_file_mod, const sstring& fname) {
     ctx_ptr->last_attempted_rp = rp;
-    return _resource_manager.get_send_units_for(buf.size_bytes()).then([this, secs_since_file_mod, &fname, buf = std::move(buf), rp, ctx_ptr] (auto units) mutable {
+    return _concurrency_limiter->get_units_for_sending(buf.size_bytes()).then([this, secs_since_file_mod, &fname, buf = std::move(buf), rp, ctx_ptr] (auto local_units) mutable {
+    return _resource_manager.get_send_units_for(buf.size_bytes()).then([this, secs_since_file_mod, &fname, buf = std::move(buf), local_units = std::move(local_units), rp, ctx_ptr] (auto global_units) mutable {
         // Future is waited on indirectly in `send_one_file()` (via `ctx_ptr->file_send_gate`).
         (void)with_gate(ctx_ptr->file_send_gate, [this, secs_since_file_mod, &fname, buf = std::move(buf), rp, ctx_ptr] () mutable {
             try {
+                const auto buf_size = buf.size_bytes();
                 auto m = this->get_mutation(ctx_ptr, buf);
                 gc_clock::duration gc_grace_sec = m.s->gc_grace_seconds();
 
@@ -826,11 +838,13 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
                     return make_ready_future<>();
                 }
 
-                return this->send_one_mutation(std::move(m)).then([this, rp, ctx_ptr] {
+                return this->send_one_mutation(std::move(m)).then([this, rp, ctx_ptr, buf_size] {
                     ++this->shard_stats().sent;
+                    _concurrency_limiter->account_successful_write(buf_size);
                 }).handle_exception([this, ctx_ptr, rp] (auto eptr) {
                     manager_logger.trace("send_one_hint(): failed to send to {}: {}", end_point_key(), eptr);
                     ctx_ptr->on_hint_send_failure(rp);
+                    return _concurrency_limiter->account_failed_sending_operation();
                 });
 
             // ignore these errors and move on - probably this hint is too old and the KS/CF has been deleted...
@@ -848,7 +862,8 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
                 ctx_ptr->on_hint_send_failure(rp);
             }
             return make_ready_future<>();
-        }).finally([units = std::move(units), ctx_ptr] {});
+        }).finally([local_units = std::move(local_units), global_units = std::move(global_units), ctx_ptr] {});
+    });
     }).handle_exception([this, ctx_ptr, rp] (auto eptr) {
         manager_logger.trace("send_one_file(): Hmmm. Something bad had happend: {}", eptr);
         ctx_ptr->on_hint_send_failure(rp);
@@ -922,6 +937,8 @@ bool manager::end_point_hints_manager::sender::send_one_file(const sstring& fnam
         return p->delete_segments({ fname });
     }).get();
 
+    shard_stats().sent_files++;
+
     // clear the replay position - we are going to send the next segment...
     _last_not_complete_rp = replay_position();
     _last_schema_ver_to_column_mapping.clear();
@@ -969,14 +986,117 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
     }
 
     if (have_segments()) {
-        // TODO: come up with something more sophisticated here
-        _next_send_retry_tp = clock::now() + 1s;
+        if (_concurrency_limiter->reached_minimum()) {
+            // Wait a random interval between 1 second and 2 minutes
+            auto ms_range = std::uniform_int_distribution<int>(1 * 1000, 30 * 1000);
+            const auto ms_to_wait = ms_range(_shard_manager.get_random_engine());
+            _next_send_retry_tp = clock::now() + std::chrono::milliseconds(ms_to_wait);
+        } else {
+            // TODO: come up with something more sophisticated here
+            _next_send_retry_tp = clock::now() + 1s;
+        }
     } else {
         // if there are no segments to send we want to retry when we maybe have some (after flushing)
         _next_send_retry_tp = _next_flush_tp;
     }
 
+    const double secs_until_next_flush = std::chrono::duration<double>(_next_send_retry_tp - clock::now()).count();
+    manager_logger.trace("send_hints(): next flush is scheduled in {} seconds", secs_until_next_flush);
+
     manager_logger.trace("send_hints(): we handled {} segments", replayed_segments_count);
+}
+
+class noop_concurrency_limiter final : public concurrency_limiter {
+public:
+    future<semaphore_units<>> get_units_for_sending(size_t size) override {
+        return make_ready_future<semaphore_units<>>(semaphore_units<>());
+    }
+
+    void account_successful_write(size_t size) override {
+        // no-op
+    }
+
+    future<> account_failed_sending_operation() override {
+        // no-op
+        return make_ready_future<>();
+    }
+
+    bool reached_minimum() const override {
+        return false;
+    }
+};
+
+seastar::shared_ptr<concurrency_limiter> concurrency_limiter::create_noop() {
+    return seastar::make_shared<noop_concurrency_limiter>();
+}
+
+class aimd_concurrency_limiter final : public concurrency_limiter {
+private:
+    // Protects the _sem semaphore.
+    // It can be waited on when holding a read lock,
+    // and its units can be modified only under a write lock.
+    seastar::rwlock _lock;
+    seastar::semaphore _sem;
+
+    // Represents the number of units of _sem when no hints are being sent.
+    // It is dynamically adjusted, based on hint send successes/failures.
+    size_t _current_limit;
+
+    // The maximum limit.
+    const size_t _max_limit;
+
+public:
+    aimd_concurrency_limiter(size_t max_limit)
+            : _sem(max_limit)
+            , _current_limit(max_limit)
+            , _max_limit(max_limit) {
+    }
+
+    future<semaphore_units<>> get_units_for_sending(size_t size) override {
+        // Calculate the number of units while the lock is held.
+        // This is important, because after a failed hint send operation
+        // we will adjust the number of units of the semaphore, while holding
+        // the lock in write mode.
+        return with_lock(_lock.for_read(), [this, size] {
+            const size_t units_count = std::min(size, _current_limit);
+            return get_units(_sem, units_count);
+        });
+    }
+
+    void account_successful_write(size_t size) override {
+        const size_t new_limit = std::min(_max_limit, _current_limit + size);
+        const size_t increase = new_limit - _current_limit;
+        if (increase > 0) {
+            _current_limit = new_limit;
+            _sem.signal(increase);
+            manager_logger.info("aimd limiter: increased units by {} (to {})", increase, new_limit);
+        }
+    }
+
+    future<> account_failed_sending_operation() override {
+        // We need to modify the semaphore units. To make sure that nobody 
+        // calculates based on the old limit and then starts waiting,
+        // we acquire the write lock.
+
+        // TODO: Don't discard
+        (void)with_lock(_lock.for_write(), [this] {
+            const size_t new_limit = std::max(size_t(1), _current_limit / 2);
+            manager_logger.info("aimd limiter: halved units from {} to {}", _current_limit, new_limit);
+
+            _sem.consume(_current_limit - new_limit);
+            _current_limit = new_limit;
+        });
+
+        return make_ready_future<>();
+    }
+
+    bool reached_minimum() const override {
+        return _current_limit == 1;
+    }
+};
+
+seastar::shared_ptr<concurrency_limiter> concurrency_limiter::create_aimd(size_t memory_limit) {
+    return seastar::make_shared<aimd_concurrency_limiter>(memory_limit);
 }
 
 static future<> scan_for_hints_dirs(const sstring& hints_directory, std::function<future<> (fs::path dir, directory_entry de, unsigned shard_id)> f) {

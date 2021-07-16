@@ -1799,9 +1799,11 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
     , _write_ack_smp_service_group(cfg.write_ack_smp_service_group)
     , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
     , _hints_resource_manager(cfg.available_memory / 10, _db.local().get_config().max_hinted_handoff_concurrency)
-    , _hints_manager(_db.local().get_config().hints_directory(), cfg.hinted_handoff_enabled, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
+    , _hints_manager(_db.local().get_config().hints_directory(), cfg.hinted_handoff_enabled, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db,
+            std::bind(db::hints::concurrency_limiter::create_aimd, cfg.available_memory / 10))
     , _hints_directory_initializer(std::move(cfg.hints_directory_initializer))
-    , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
+    , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db,
+            db::hints::concurrency_limiter::create_noop)
     , _stats_key(stats_key)
     , _features(feat)
     , _messaging(ms)
