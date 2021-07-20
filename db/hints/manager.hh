@@ -85,7 +85,7 @@ public:
 
     virtual future<semaphore_units<>> get_units_for_sending(size_t size) = 0;
     virtual void account_successful_write(size_t size) = 0;
-    virtual future<> account_failed_sending_operation() = 0;
+    virtual void account_failed_sending_operation() = 0;
 
     virtual bool reached_minimum() const = 0;
 

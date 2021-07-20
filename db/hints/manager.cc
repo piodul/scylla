@@ -844,7 +844,6 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
                 }).handle_exception([this, ctx_ptr, rp] (auto eptr) {
                     manager_logger.trace("send_one_hint(): failed to send to {}: {}", end_point_key(), eptr);
                     ctx_ptr->on_hint_send_failure(rp);
-                    return _concurrency_limiter->account_failed_sending_operation();
                 });
 
             // ignore these errors and move on - probably this hint is too old and the KS/CF has been deleted...
@@ -928,6 +927,8 @@ bool manager::end_point_hints_manager::sender::send_one_file(const sstring& fnam
         // the last entry that was successfully read from commitlog (last_attempted_rp).
         _last_not_complete_rp = ctx_ptr->first_failed_rp.value_or(ctx_ptr->last_attempted_rp.value_or(_last_not_complete_rp));
         manager_logger.trace("send_one_file(): error while sending hints from {}, last RP is {}", fname, _last_not_complete_rp);
+
+        _concurrency_limiter->account_failed_sending_operation();
         return false;
     }
 
@@ -987,7 +988,7 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
 
     if (have_segments()) {
         if (_concurrency_limiter->reached_minimum()) {
-            // Wait a random interval between 1 second and 2 minutes
+            // Wait a random interval between 1 and 30 seconds
             auto ms_range = std::uniform_int_distribution<int>(1 * 1000, 30 * 1000);
             const auto ms_to_wait = ms_range(_shard_manager.get_random_engine());
             _next_send_retry_tp = clock::now() + std::chrono::milliseconds(ms_to_wait);
@@ -1016,9 +1017,8 @@ public:
         // no-op
     }
 
-    future<> account_failed_sending_operation() override {
+    void account_failed_sending_operation() override {
         // no-op
-        return make_ready_future<>();
     }
 
     bool reached_minimum() const override {
@@ -1032,10 +1032,6 @@ seastar::shared_ptr<concurrency_limiter> concurrency_limiter::create_noop() {
 
 class aimd_concurrency_limiter final : public concurrency_limiter {
 private:
-    // Protects the _sem semaphore.
-    // It can be waited on when holding a read lock,
-    // and its units can be modified only under a write lock.
-    seastar::rwlock _lock;
     seastar::semaphore _sem;
 
     // Represents the number of units of _sem when no hints are being sent.
@@ -1046,10 +1042,10 @@ private:
     const size_t _max_limit;
 
 public:
-    aimd_concurrency_limiter(size_t max_limit)
-            : _sem(max_limit)
-            , _current_limit(max_limit)
-            , _max_limit(max_limit) {
+    aimd_concurrency_limiter()
+            : _sem(1)
+            , _current_limit(1)
+            , _max_limit(1) {
     }
 
     future<semaphore_units<>> get_units_for_sending(size_t size) override {
@@ -1057,37 +1053,32 @@ public:
         // This is important, because after a failed hint send operation
         // we will adjust the number of units of the semaphore, while holding
         // the lock in write mode.
-        return with_lock(_lock.for_read(), [this, size] {
-            const size_t units_count = std::min(size, _current_limit);
-            return get_units(_sem, units_count);
-        });
+        const size_t units_count = std::min(size, _current_limit);
+        return get_units(_sem, units_count);
     }
 
     void account_successful_write(size_t size) override {
-        const size_t new_limit = std::min(_max_limit, _current_limit + size);
+        const size_t base_size = std::min(size, _current_limit);
+        const size_t addition = std::max(size_t(1), base_size * base_size / _current_limit);
+
+        const size_t new_limit = std::min(_max_limit, _current_limit + addition);
         const size_t increase = new_limit - _current_limit;
         if (increase > 0) {
             _current_limit = new_limit;
             _sem.signal(increase);
-            manager_logger.info("aimd limiter: increased units by {} (to {})", increase, new_limit);
+            manager_logger.trace("aimd limiter: increased units by {} (to {})", increase, new_limit);
         }
     }
 
-    future<> account_failed_sending_operation() override {
-        // We need to modify the semaphore units. To make sure that nobody 
-        // calculates based on the old limit and then starts waiting,
-        // we acquire the write lock.
+    // This method MUST NOT be called when there are any hint sending operations in progress
+    void account_failed_sending_operation() override {
+        assert(_sem.waiters() == 0 && _sem.available_units() == _current_limit);
 
-        // TODO: Don't discard
-        (void)with_lock(_lock.for_write(), [this] {
-            const size_t new_limit = std::max(size_t(1), _current_limit / 2);
-            manager_logger.info("aimd limiter: halved units from {} to {}", _current_limit, new_limit);
+        const size_t new_limit = std::max(size_t(1), _current_limit / 2);
+        manager_logger.trace("aimd limiter: halved units from {} to {}", _current_limit, new_limit);
 
-            _sem.consume(_current_limit - new_limit);
-            _current_limit = new_limit;
-        });
-
-        return make_ready_future<>();
+        _sem.consume(_current_limit - new_limit);
+        _current_limit = new_limit;
     }
 
     bool reached_minimum() const override {
@@ -1096,7 +1087,8 @@ public:
 };
 
 seastar::shared_ptr<concurrency_limiter> concurrency_limiter::create_aimd(size_t memory_limit) {
-    return seastar::make_shared<aimd_concurrency_limiter>(memory_limit);
+    // TODO: Remove the memory limit parameter
+    return seastar::make_shared<aimd_concurrency_limiter>();
 }
 
 static future<> scan_for_hints_dirs(const sstring& hints_directory, std::function<future<> (fs::path dir, directory_entry de, unsigned shard_id)> f) {
