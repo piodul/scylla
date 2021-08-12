@@ -1102,6 +1102,20 @@ bool manager::end_point_hints_manager::sender::send_one_file(const sstring& fnam
 
     // If we got here we are done with the current segment and we can remove it.
     with_shared(_file_update_mutex, [&fname, this] {
+        if (utils::get_local_injector().enter("hinted_handoff_send_indefintely_in_a_loop")) {
+            // If the error injection is enabled, don't actually delete the segment.
+            // After we process all segments in the segments_to_replay queue, we will pick them up again
+            // on commitlog re-creation and will send them again in the same order.
+            //
+            // This is useful during testing performance issues related to sending/receiving hints - it is
+            // sufficient to generate hint files only once and then use them in multiple tests, and
+            // there is no need to re-populate the hint segments before each tests.
+            //
+            // While this error injection is enabled, the sync point API is not guaranteed to work
+            // properly until it is disabled and all "looped" segments are actually deleted. This is fine,
+            // because it's testing code anyway.
+            return make_ready_future<>();
+        }
         auto p = _ep_manager.get_or_load().get0();
         return p->delete_segments({ fname });
     }).get();
