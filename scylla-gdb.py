@@ -1826,12 +1826,17 @@ class scylla_memory(gdb.Command):
                   '  virt dirty: {reg_virt_dirty:>13}\n'
                   ' System:\n'
                   '  real dirty: {sys_real_dirty:>13}\n'
-                  '  virt dirty: {sys_virt_dirty:>13}\n\n'
+                  '  virt dirty: {sys_virt_dirty:>13}\n'
+                  ' Streaming:\n'
+                  '  real dirty: {str_real_dirty:>13}\n'
+                  '  virt dirty: {str_virt_dirty:>13}\n\n'
                   .format(total=(lsa_allocated-cache_region.total()),
                           reg_real_dirty=dirty_mem_mgr(db['_dirty_memory_manager']).real_dirty(),
                           reg_virt_dirty=dirty_mem_mgr(db['_dirty_memory_manager']).virt_dirty(),
                           sys_real_dirty=dirty_mem_mgr(db['_system_dirty_memory_manager']).real_dirty(),
-                          sys_virt_dirty=dirty_mem_mgr(db['_system_dirty_memory_manager']).virt_dirty()))
+                          sys_virt_dirty=dirty_mem_mgr(db['_system_dirty_memory_manager']).virt_dirty(),
+                          str_real_dirty=dirty_mem_mgr(db['_streaming_dirty_memory_manager']).real_dirty(),
+                          str_virt_dirty=dirty_mem_mgr(db['_streaming_dirty_memory_manager']).virt_dirty()))
 
         scylla_memory.print_coordinator_stats()
         scylla_memory.print_replica_stats()
@@ -3489,6 +3494,12 @@ class scylla_cache(gdb.Command):
 def find_sstables_attached_to_tables():
     db = find_db(current_shard())
     for table in all_tables(db):
+        for (key, value) in std_unordered_set(table['_streaming_memtables_big']):
+            memtables = seastar_lw_shared_ptr(value)['memtables']
+            sstables = seastar_lw_shared_ptr(value)['sstables']
+            for sst_ptr in std_vector(sstables):
+                yield seastar_lw_shared_ptr(sst_ptr).get()
+
         for sst_ptr in std_unordered_set(seastar_lw_shared_ptr(seastar_lw_shared_ptr(table['_sstables']).get()['_all']).get().dereference()):
             yield seastar_lw_shared_ptr(sst_ptr).get()
 
