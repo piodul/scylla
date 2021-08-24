@@ -57,6 +57,36 @@ const std::string manager::FILENAME_PREFIX("HintsLog" + commitlog::descriptor::S
 const std::chrono::seconds manager::hint_file_write_timeout = std::chrono::seconds(2);
 const std::chrono::seconds manager::hints_flush_period = std::chrono::seconds(10);
 
+/// A replay position comparator which prioritizes segment IDs from other shards.
+struct foreign_first_segment_id_comparator {
+    unsigned local_shard_id = this_shard_id();
+
+    bool operator()(const db::segment_id_type& a, const db::segment_id_type& b) const {
+        const unsigned shard_a = db::replay_position(a).shard_id();
+        const unsigned shard_b = db::replay_position(b).shard_id();
+
+        if (shard_a == shard_b) {
+            return a < b;
+        }
+
+        // Let S be the current shard, N - number of shards.
+        // Put shards in the following order:
+        //   (S + N - 1) % N
+        //   (S + N - 2) % N
+        //   ...
+        //   (S + 1) % N
+        //   S
+        // This will, hopefully, prevent a situation in which hints managers from
+        // all shards gang up on one shard and send hints to it at the same time.
+        // Of course, nothing will help us if all shards have foreign segments
+        // towards one shard only.
+
+        // Instead of using modulo, we can use unsigned underflow. Resulting values
+        // will have the same ordering as if modulo smp::count was used.
+        return (shard_a - local_shard_id) > (shard_b - local_shard_id);
+    }
+};
+
 manager::manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager& res_manager, distributed<database>& db)
     : _hints_dir(fs::path(hints_directory) / format("{:d}", this_shard_id()))
     , _host_filter(std::move(filter))
@@ -440,27 +470,23 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
                     return make_ready_future<commitlog>(std::move(l));
                 }
 
-                std::vector<std::pair<db::segment_id_type, sstring>> local_segs_vec;
-                local_segs_vec.reserve(segs_vec.size());
+                std::vector<std::pair<db::segment_id_type, sstring>> segs_with_ids;
+                segs_with_ids.reserve(segs_vec.size());
 
-                // Divide segments into those that were created on this shard
-                // and those which were moved to it during rebalancing.
                 for (auto& seg : segs_vec) {
                     db::commitlog::descriptor desc(seg, manager::FILENAME_PREFIX);
-                    unsigned shard_id = db::replay_position(desc).shard_id();
-                    if (shard_id == this_shard_id()) {
-                        local_segs_vec.emplace_back(desc.id, std::move(seg));
-                    } else {
-                        _sender.add_foreign_segment(std::move(seg));
-                    }
+                    segs_with_ids.emplace_back(desc.id, std::move(seg));
                 }
 
-                // Sort local segments by their segment ids, which should
-                // correspond to the chronological order.
-                std::sort(local_segs_vec.begin(), local_segs_vec.end());
+                // Sort segments by their segment IDs, starting from those
+                // which are from foreign shards
+                foreign_first_segment_id_comparator cmp;
+                std::sort(segs_with_ids.begin(), segs_with_ids.end(), [cmp] (const auto& a, const auto& b) {
+                    return cmp(a.first, b.first);
+                });
 
-                for (auto& [segment_id, seg] : local_segs_vec) {
-                    _sender.add_segment(std::move(seg));
+                for (auto& [segment_id, seg] : segs_with_ids) {
+                    _sender.add_segment(segment_id, std::move(seg));
                 }
 
                 return make_ready_future<commitlog>(std::move(l));
@@ -793,12 +819,8 @@ future<> manager::end_point_hints_manager::sender::stop(drain should_drain) noex
     });
 }
 
-void manager::end_point_hints_manager::sender::add_segment(sstring seg_name) {
-    _segments_to_replay.emplace_back(std::move(seg_name));
-}
-
-void manager::end_point_hints_manager::sender::add_foreign_segment(sstring seg_name) {
-    _foreign_segments_to_replay.emplace_back(std::move(seg_name));
+void manager::end_point_hints_manager::sender::add_segment(db::segment_id_type seg_id, sstring seg_name) {
+    _segments_to_replay.emplace_back(seg_id, std::move(seg_name));
 }
 
 manager::end_point_hints_manager::sender::clock::duration manager::end_point_hints_manager::sender::next_sleep_duration() const {
@@ -910,8 +932,8 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
 }
 
 void manager::end_point_hints_manager::sender::notify_replay_waiters() noexcept {
-    if (!_foreign_segments_to_replay.empty()) {
-        manager_logger.trace("[{}] notify_replay_waiters(): not notifying because there are still {} foreign segments to replay", end_point_key(), _foreign_segments_to_replay.size());
+    if (has_foreign_segments()) {
+        manager_logger.trace("[{}] notify_replay_waiters(): not notifying because there are still some foreign segments to replay", end_point_key());
         return;
     }
 
@@ -937,7 +959,7 @@ void manager::end_point_hints_manager::sender::dismiss_replay_waiters() noexcept
 
 future<> manager::end_point_hints_manager::sender::wait_until_hints_are_replayed_up_to(abort_source& as, db::replay_position up_to_rp) {
     manager_logger.debug("[{}] wait_until_hints_are_replayed_up_to(): entering with target {}", end_point_key(), up_to_rp);
-    if (_foreign_segments_to_replay.empty() && up_to_rp < _sent_upper_bound_rp) {
+    if (!has_foreign_segments() && up_to_rp < _sent_upper_bound_rp) {
         manager_logger.debug("[{}] wait_until_hints_are_replayed_up_to(): hints were already replayed above the point ({} < {})", end_point_key(), up_to_rp, _sent_upper_bound_rp);
         return make_ready_future<>();
     }
@@ -1096,29 +1118,25 @@ bool manager::end_point_hints_manager::sender::send_one_file(const sstring& fnam
     return true;
 }
 
+bool manager::end_point_hints_manager::sender::has_foreign_segments() const {
+    return !_segments_to_replay.empty() && db::replay_position(_segments_to_replay.front().first).shard_id() != this_shard_id();
+}
+
 const sstring* manager::end_point_hints_manager::sender::name_of_current_segment() const {
-    // Foreign segments are replayed first
-    if (!_foreign_segments_to_replay.empty()) {
-        return &_foreign_segments_to_replay.front();
-    }
     if (!_segments_to_replay.empty()) {
-        return &_segments_to_replay.front();
+        return &_segments_to_replay.front().second;
     }
     return nullptr;
 }
 
 void manager::end_point_hints_manager::sender::pop_current_segment() {
-    if (!_foreign_segments_to_replay.empty()) {
-        _foreign_segments_to_replay.pop_front();
-    } else if (!_segments_to_replay.empty()) {
-        _segments_to_replay.pop_front();
-    }
+    _segments_to_replay.pop_front();
 }
 
 // Runs in the seastar::async context
 void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
     using namespace std::literals::chrono_literals;
-    manager_logger.trace("send_hints(): going to send hints to {}, we have {} segment to replay", end_point_key(), _segments_to_replay.size() + _foreign_segments_to_replay.size());
+    manager_logger.trace("send_hints(): going to send hints to {}, we have {} segment to replay", end_point_key(), _segments_to_replay.size());
 
     int replayed_segments_count = 0;
 

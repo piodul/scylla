@@ -139,9 +139,7 @@ public:
             };
 
         private:
-            std::list<sstring> _segments_to_replay;
-            // Segments to replay which were not created on this shard but were moved during rebalancing
-            std::list<sstring> _foreign_segments_to_replay;
+            std::list<std::pair<db::segment_id_type, sstring>> _segments_to_replay;
             replay_position _last_not_complete_rp;
             replay_position _sent_upper_bound_rp;
             std::unordered_map<table_schema_version, column_mapping> _last_schema_ver_to_column_mapping;
@@ -187,20 +185,20 @@ public:
             future<> stop(drain should_drain) noexcept;
 
             /// \brief Add a new segment ready for sending.
-            void add_segment(sstring seg_name);
-
-            /// \brief Add a new segment originating from another shard, ready for sending.
-            void add_foreign_segment(sstring seg_name);
+            void add_segment(db::segment_id_type, sstring seg_name);
 
             /// \brief Check if there are still unsent segments.
             /// \return TRUE if there are still unsent segments.
-            bool have_segments() const noexcept { return !_segments_to_replay.empty() || !_foreign_segments_to_replay.empty(); };
+            bool have_segments() const noexcept { return !_segments_to_replay.empty(); };
 
             /// \brief Sets the sent_upper_bound_rp marker to indicate that the hints were replayed _up to_ given position.
             void rewind_sent_replay_position_to(db::replay_position rp);
 
             /// \brief Waits until hints are replayed up to a given replay position, or given abort source is triggered.
             future<> wait_until_hints_are_replayed_up_to(abort_source& as, db::replay_position up_to_rp);
+
+            /// \brief Returns if there are still foreign segments to replay;
+            bool has_foreign_segments() const;
 
         private:
             /// \brief Gets the name of the current segment that should be sent.
