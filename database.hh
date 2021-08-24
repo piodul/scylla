@@ -121,6 +121,7 @@ class config;
 class extensions;
 class rp_handle;
 class data_listeners;
+class flush_listener_list;
 class large_data_handler;
 
 namespace system_keyspace {
@@ -400,6 +401,7 @@ public:
         db::timeout_semaphore* view_update_concurrency_semaphore;
         size_t view_update_concurrency_semaphore_limit;
         db::data_listeners* data_listeners = nullptr;
+        db::flush_listener_list* streaming_flush_listeners = nullptr;
     };
     struct no_commitlog {};
 
@@ -1430,6 +1432,7 @@ private:
 
     friend db::data_listeners;
     std::unique_ptr<db::data_listeners> _data_listeners;
+    std::unique_ptr<db::flush_listener_list> _streaming_flush_listeners;
 
     service::migration_notifier& _mnotifier;
     gms::feature_service& _feat;
@@ -1688,6 +1691,10 @@ public:
 
     db::data_listeners& data_listeners() const {
         return *_data_listeners;
+    }
+
+    db::flush_listener_list& streaming_flush_listeners() const {
+        return *_streaming_flush_listeners;
     }
 
     bool supports_infinite_bound_range_deletions() {

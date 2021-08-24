@@ -62,6 +62,7 @@
 #include "db/timeout_clock.hh"
 #include "db/large_data_handler.hh"
 #include "db/data_listeners.hh"
+#include "db/flush_listener.hh"
 
 #include "user_types_metadata.hh"
 #include <seastar/core/shared_ptr_incomplete.hh>
@@ -363,6 +364,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>())
+    , _streaming_flush_listeners(std::make_unique<db::flush_listener_list>())
     , _mnotifier(mn)
     , _feat(feat)
     , _shared_token_metadata(stm)
@@ -1144,6 +1146,7 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.view_update_concurrency_semaphore = _config.view_update_concurrency_semaphore;
     cfg.view_update_concurrency_semaphore_limit = _config.view_update_concurrency_semaphore_limit;
     cfg.data_listeners = &db.data_listeners();
+    cfg.streaming_flush_listeners = &db.streaming_flush_listeners();
 
     return cfg;
 }

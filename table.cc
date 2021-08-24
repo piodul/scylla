@@ -48,6 +48,7 @@
 #include "mutation_source_metadata.hh"
 #include "gms/gossiper.hh"
 #include "db/config.hh"
+#include "db/flush_listener.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 
@@ -582,6 +583,15 @@ table::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
         // We will also not have any retry logic. If we fail here, we'll fail the streaming and let
         // the upper layers know. They can then apply any logic they want here.
       });
+    }).then_wrapped([this, id = old->get_id()] (future<> f) {
+        if (_config.streaming_flush_listeners != nullptr) {
+            if (!f.failed()) {
+                _config.streaming_flush_listeners->notify_successful_flush(id);
+            } else {
+                _config.streaming_flush_listeners->notify_failed_flush(id);
+            }
+        }
+        return f;
     }).finally([guard = std::move(guard)] { });
   });
 }

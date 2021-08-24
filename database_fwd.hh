@@ -51,3 +51,6 @@ using clustering_key_view = clustering_key_prefix_view;
 
 // memtable.hh
 class memtable;
+
+// flush_listener.hh
+class flush_listener;
