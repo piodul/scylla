@@ -811,7 +811,7 @@ public:
     // The mutation is always upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle&& = {});
     void apply(const mutation& m, db::rp_handle&& = {});
-    void apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
+    utils::UUID apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
 
     // Returns at most "cmd.limit" rows
     // The saved_querier parameter is an input-output parameter which contains
@@ -1570,7 +1570,9 @@ public:
     // Throws timed_out_error when timeout is reached.
     future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout);
     future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
-    future<> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
+
+    // TODO: s/utils::UUID/memtable::id
+    future<utils::UUID> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
     const sstring& get_snitch_name() const;

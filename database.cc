@@ -1939,7 +1939,7 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
     });
 }
 
-future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
+future<utils::UUID> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
     if (!s->is_synced()) {
         throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
                                  s->ks_name(), s->cf_name(), s->version()));
@@ -1948,7 +1948,7 @@ future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, c
         return _streaming_dirty_memory_manager.region_group().run_when_memory_available([this, &m, plan_id, fragmented, s = std::move(s)] {
             auto uuid = m.column_family_id();
             auto& cf = find_column_family(uuid);
-            cf.apply_streaming_mutation(s, plan_id, std::move(m), fragmented);
+            return cf.apply_streaming_mutation(s, plan_id, std::move(m), fragmented);
         }, db::no_timeout);
     });
 }

@@ -2079,15 +2079,19 @@ void table::drop_hit_rate(gms::inet_address addr) {
     _cluster_cache_hit_rates.erase(addr);
 }
 
-void table::apply_streaming_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
+utils::UUID table::apply_streaming_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
     if (tlogger.is_enabled(logging::log_level::trace)) {
         tlogger.trace("streaming apply {}", m.pretty_printer(m_schema));
     }
-    if (fragmented) {
-        apply_streaming_big_mutation(std::move(m_schema), plan_id, m);
-        return;
-    }
-    _streaming_memtables->active_memtable().apply(m, m_schema);
+    // TODO: We are not using mutation fragmenting at the moment
+    assert(!fragmented);
+    // if (fragmented) {
+    //     apply_streaming_big_mutation(std::move(m_schema), plan_id, m);
+    //     return;
+    // }
+    auto& mtbl = _streaming_memtables->active_memtable();
+    mtbl.apply(m, m_schema);
+    return mtbl.get_id();
 }
 
 void table::apply_streaming_big_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m) {
