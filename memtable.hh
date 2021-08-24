@@ -35,6 +35,7 @@
 #include "mutation_cleaner.hh"
 #include "sstables/types.hh"
 #include "utils/double-decker.hh"
+#include "utils/UUID.hh"
 
 class frozen_mutation;
 class flat_mutation_reader;
@@ -114,6 +115,8 @@ public:
     using partitions_type = double_decker<int64_t, memtable_entry,
                             dht::raw_token_less_comparator, dht::ring_position_comparator,
                             16, bplus::key_search::linear>;
+    
+    using id = utils::UUID;
 private:
     dirty_memory_manager& _dirty_mgr;
     mutation_cleaner _cleaner;
@@ -134,6 +137,7 @@ private:
     mutation_source_opt _underlying;
     uint64_t _flushed_memory = 0;
     table_stats& _table_stats;
+    id _id;
 
     class memtable_encoding_stats_collector : public encoding_stats_collector {
     private:
@@ -222,6 +226,10 @@ public:
 
     api::timestamp_type get_max_timestamp() const {
         return _stats_collector.get_max_timestamp();
+    }
+
+    const id& get_id() const {
+        return _id;
     }
 
     mutation_cleaner& cleaner() {

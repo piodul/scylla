@@ -27,6 +27,7 @@
 #include "partition_snapshot_reader.hh"
 #include "partition_builder.hh"
 #include "mutation_partition_view.hh"
+#include "utils/UUID_gen.hh"
 
 void memtable::memtable_encoding_stats_collector::update_timestamp(api::timestamp_type ts) {
     if (ts != api::missing_timestamp) {
@@ -121,7 +122,8 @@ memtable::memtable(schema_ptr schema, dirty_memory_manager& dmm, table_stats& ta
         , _memtable_list(memtable_list)
         , _schema(std::move(schema))
         , partitions(dht::raw_token_less_comparator{})
-        , _table_stats(table_stats) {
+        , _table_stats(table_stats)
+        , _id(utils::UUID_gen::get_time_UUID()) {
 }
 
 static thread_local dirty_memory_manager mgr_for_tests;
