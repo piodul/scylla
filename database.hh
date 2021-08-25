@@ -447,33 +447,9 @@ private:
     lw_shared_ptr<memtable_list> _streaming_memtables;
     utils::phased_barrier _streaming_flush_phaser;
 
-    // If mutations are fragmented during streaming the sstables cannot be made
-    // visible immediately after memtable flush, because that could cause
-    // readers to see only a part of a partition thus violating isolation
-    // guarantees.
-    // Mutations that are sent in fragments are kept separately in per-streaming
-    // plan memtables and the resulting sstables are not made visible until
-    // the streaming is complete.
-    struct monitored_sstable {
-        std::unique_ptr<database_sstable_write_monitor> monitor;
-        sstables::shared_sstable sstable;
-    };
-
-    struct streaming_memtable_big {
-        lw_shared_ptr<memtable_list> memtables;
-        std::vector<monitored_sstable> sstables;
-        seastar::gate flush_in_progress;
-    };
-    std::unordered_map<utils::UUID, lw_shared_ptr<streaming_memtable_big>> _streaming_memtables_big;
-
-    future<std::vector<monitored_sstable>> flush_streaming_big_mutations(utils::UUID plan_id);
-    void apply_streaming_big_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m);
-    future<> seal_active_streaming_memtable_big(streaming_memtable_big& smb, flush_permit&&);
-
     lw_shared_ptr<memtable_list> make_memory_only_memtable_list();
     lw_shared_ptr<memtable_list> make_memtable_list();
     lw_shared_ptr<memtable_list> make_streaming_memtable_list();
-    lw_shared_ptr<memtable_list> make_streaming_memtable_big_list(streaming_memtable_big& smb);
 
     sstables::compaction_strategy _compaction_strategy;
     // SSTable set which contains all non-maintenance sstables
@@ -811,7 +787,7 @@ public:
     // The mutation is always upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle&& = {});
     void apply(const mutation& m, db::rp_handle&& = {});
-    utils::UUID apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
+    utils::UUID apply_streaming_mutation(schema_ptr, const frozen_mutation&);
 
     // Returns at most "cmd.limit" rows
     // The saved_querier parameter is an input-output parameter which contains
@@ -860,8 +836,7 @@ public:
     void start();
     future<> stop();
     future<> flush(std::optional<db::replay_position> = {});
-    future<> flush_streaming_mutations(utils::UUID plan_id, dht::partition_range_vector ranges = dht::partition_range_vector{});
-    future<> fail_streaming_mutations(utils::UUID plan_id);
+    future<> flush_streaming_mutations();
     future<> clear(); // discards memtable(s) without flushing them to disk.
     future<db::replay_position> discard_sstables(db_clock::time_point);
 
@@ -1572,7 +1547,7 @@ public:
     future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
 
     // TODO: s/utils::UUID/memtable::id
-    future<utils::UUID> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
+    future<utils::UUID> apply_streaming_mutation(schema_ptr, const frozen_mutation&);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
     const sstring& get_snitch_name() const;
@@ -1645,6 +1620,7 @@ public:
     void set_format_by_config();
 
     future<> flush_all_memtables();
+    future<> flush_all_streaming_memtables();
     future<> flush(const sstring& ks, const sstring& cf);
 
     // See #937. Truncation now requires a callback to get a time stamp

@@ -596,42 +596,6 @@ table::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
   });
 }
 
-future<> table::seal_active_streaming_memtable_big(streaming_memtable_big& smb, flush_permit&& permit) {
-    return make_exception_future<>(std::runtime_error("sealing big memtables is not implemented"));
-//   return with_scheduling_group(_config.streaming_scheduling_group, [this, &smb, permit = std::move(permit)] () mutable {
-//     auto old = smb.memtables->back();
-//     if (old->empty()) {
-//         return make_ready_future<>();
-//     }
-//     smb.memtables->add_memtable();
-//     smb.memtables->erase(old);
-//     return with_gate(_streaming_flush_gate, [this, old, &smb, permit = std::move(permit)] () mutable {
-//         return with_gate(smb.flush_in_progress, [this, old, &smb, permit = std::move(permit)] () mutable {
-//             auto newtab = make_sstable();
-
-//             auto fp = permit.release_sstable_write_permit();
-//             auto monitor = std::make_unique<database_sstable_write_monitor>(make_lw_shared<sstable_write_permit>(std::move(fp)), newtab, _compaction_strategy, old->get_max_timestamp());
-//             auto&& priority = service::get_local_streaming_priority();
-//             sstables::sstable_writer_config cfg = get_sstables_manager().configure_writer("streaming_big");
-//             cfg.backup = incremental_backups_enabled();
-//             cfg.leave_unsealed = true;
-//             auto fut = write_memtable_to_sstable(*old, newtab, *monitor, cfg, priority);
-//             return fut.then_wrapped([this, newtab, old, &smb, permit = std::move(permit), monitor = std::move(monitor)] (future<> f) mutable {
-//                 if (!f.failed()) {
-//                     smb.sstables.push_back(monitored_sstable{std::move(monitor), newtab});
-//                     return make_ready_future<>();
-//                 } else {
-//                     newtab->mark_for_deletion();
-//                     auto ep = f.get_exception();
-//                     tlogger.error("failed to write streamed sstable: {}", ep);
-//                     return make_exception_future<>(ep);
-//                 }
-//             });
-//         });
-//     });
-//   });
-}
-
 future<>
 table::seal_active_memtable(flush_permit&& permit) {
     auto old = _memtables->back();
@@ -1293,15 +1257,6 @@ table::make_streaming_memtable_list() {
     return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.streaming_dirty_memory_manager, _stats, _config.streaming_scheduling_group);
 }
 
-lw_shared_ptr<memtable_list>
-table::make_streaming_memtable_big_list(streaming_memtable_big& smb) {
-    auto seal = [this, &smb] (flush_permit&& permit) {
-        return seal_active_streaming_memtable_big(smb, std::move(permit));
-    };
-    auto get_schema =  [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.streaming_dirty_memory_manager, _stats, _config.streaming_scheduling_group);
-}
-
 table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager,
              cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
     : _schema(std::move(schema))
@@ -1380,11 +1335,6 @@ logalloc::occupancy_stats table::occupancy() const {
     }
     for (auto m : *_streaming_memtables) {
         res += m->region().occupancy();
-    }
-    for (auto smb : _streaming_memtables_big) {
-        for (auto m : *smb.second->memtables) {
-            res += m->region().occupancy();
-        }
     }
     return res;
 }
@@ -1622,72 +1572,20 @@ bool table::can_flush() const {
     return _memtables->can_flush();
 }
 
-// FIXME: We can do much better than this in terms of cache management. Right
-// now, we only have to flush the touched ranges because of the possibility of
-// streaming containing token ownership changes.
-//
 // Right now we can't differentiate between that and a normal repair process,
 // so we always flush. When we can differentiate those streams, we should not
 // be indiscriminately touching the cache during repair. We will just have to
 // invalidate the entries that are relevant to things we already have in the cache.
-future<> table::flush_streaming_mutations(utils::UUID plan_id, dht::partition_range_vector ranges) {
+future<> table::flush_streaming_mutations() {
     // This will effectively take the gate twice for this call. The proper way to fix that would
     // be to change seal_active_streaming_memtable_delayed to take a range parameter. However, we
     // need this code to go away as soon as we can (see FIXME above). So the double gate is a better
     // temporary counter measure.
-    tlogger.debug("Flushing streaming memtable, plan={}", plan_id);
-    return with_gate(_streaming_flush_gate, [this, plan_id, ranges = std::move(ranges)] () mutable {
-        return flush_streaming_big_mutations(plan_id).then([this, ranges = std::move(ranges)] (auto sstables) mutable {
-            return _streaming_memtables->seal_active_memtable_delayed().then([this] {
-                return _streaming_flush_phaser.advance_and_await();
-            }).then([this, sstables = std::move(sstables), ranges = std::move(ranges)] () mutable {
-                if (sstables.empty()) {
-                    return make_ready_future<>();
-                }
-                return _cache.invalidate(row_cache::external_updater([this, sstables = std::move(sstables)] () mutable noexcept {
-                    // FIXME: this is not really noexcept, but we need to provide strong exception guarantees.
-                    for (auto&& sst : sstables) {
-                        // seal_active_streaming_memtable_big() ensures sst is unshared.
-                        this->add_sstable(sst.sstable);
-                    }
-                    this->try_trigger_compaction();
-                }), std::move(ranges));
-            });
+    tlogger.debug("Flushing streaming memtables for {}.{}", _schema->ks_name(), _schema->cf_name());
+    return with_gate(_streaming_flush_gate, [this] () mutable {
+        return _streaming_memtables->seal_active_memtable_delayed().then([this] {
+            return _streaming_flush_phaser.advance_and_await();
         });
-    });
-}
-
-future<std::vector<table::monitored_sstable>> table::flush_streaming_big_mutations(utils::UUID plan_id) {
-    auto it = _streaming_memtables_big.find(plan_id);
-    if (it == _streaming_memtables_big.end()) {
-        return make_ready_future<std::vector<monitored_sstable>>(std::vector<monitored_sstable>());
-    }
-    auto entry = it->second;
-    _streaming_memtables_big.erase(it);
-    return entry->memtables->request_flush().then([entry] {
-        return entry->flush_in_progress.close();
-    }).then([this, entry] {
-        return parallel_for_each(entry->sstables, [this] (auto& sst) {
-            return sst.sstable->seal_sstable(this->incremental_backups_enabled()).then([&sst] {
-                return sst.sstable->open_data();
-            });
-        }).then([this, entry] {
-            return std::move(entry->sstables);
-        });
-    });
-}
-
-future<> table::fail_streaming_mutations(utils::UUID plan_id) {
-    auto it = _streaming_memtables_big.find(plan_id);
-    if (it == _streaming_memtables_big.end()) {
-        return make_ready_future<>();
-    }
-    auto entry = it->second;
-    _streaming_memtables_big.erase(it);
-    return entry->flush_in_progress.close().then([this, entry] {
-        for (auto&& sst : entry->sstables) {
-            sst.sstable->mark_for_deletion();
-        }
     });
 }
 
@@ -1699,7 +1597,6 @@ future<> table::clear() {
     }
     _memtables->clear_and_add();
     _streaming_memtables->clear_and_add();
-    _streaming_memtables_big.clear();
     return _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
 }
 
@@ -1775,12 +1672,6 @@ void table::set_schema(schema_ptr s) {
 
     for (auto& m : *_streaming_memtables) {
         m->set_schema(s);
-    }
-
-    for (auto smb : _streaming_memtables_big) {
-        for (auto m : *smb.second->memtables) {
-            m->set_schema(s);
-        }
     }
 
     _cache.set_schema(s);
@@ -2079,29 +1970,13 @@ void table::drop_hit_rate(gms::inet_address addr) {
     _cluster_cache_hit_rates.erase(addr);
 }
 
-utils::UUID table::apply_streaming_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
+utils::UUID table::apply_streaming_mutation(schema_ptr m_schema, const frozen_mutation& m) {
     if (tlogger.is_enabled(logging::log_level::trace)) {
         tlogger.trace("streaming apply {}", m.pretty_printer(m_schema));
     }
-    // TODO: We are not using mutation fragmenting at the moment
-    assert(!fragmented);
-    // if (fragmented) {
-    //     apply_streaming_big_mutation(std::move(m_schema), plan_id, m);
-    //     return;
-    // }
     auto& mtbl = _streaming_memtables->active_memtable();
     mtbl.apply(m, m_schema);
     return mtbl.get_id();
-}
-
-void table::apply_streaming_big_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m) {
-    auto it = _streaming_memtables_big.find(plan_id);
-    if (it == _streaming_memtables_big.end()) {
-        it = _streaming_memtables_big.emplace(plan_id, make_lw_shared<streaming_memtable_big>()).first;
-        it->second->memtables = _config.enable_disk_writes ? make_streaming_memtable_big_list(*it->second) : make_memory_only_memtable_list();
-    }
-    auto entry = it->second;
-    entry->memtables->active_memtable().apply(m, m_schema);
 }
 
 void

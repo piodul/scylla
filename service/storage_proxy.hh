@@ -509,7 +509,7 @@ public:
     future<> mutate_hint(const schema_ptr&, const frozen_mutation& m, tracing::trace_state_ptr tr_state, clock_type::time_point timeout = clock_type::time_point::max());
 
     // TODO: s/utils::UUID/memtable::id
-    future<utils::UUID> mutate_streaming_mutation(const schema_ptr&, utils::UUID plan_id, const frozen_mutation& m, bool fragmented);
+    future<utils::UUID> mutate_streaming_mutation(const schema_ptr&, const frozen_mutation& m);
 
     /**
     * Use this method to have these Mutations applied

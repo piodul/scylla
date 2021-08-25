@@ -1913,14 +1913,14 @@ storage_proxy::mutate_counter_on_leader_and_replicate(const schema_ptr& s, froze
 }
 
 future<utils::UUID>
-storage_proxy::mutate_streaming_mutation(const schema_ptr& s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
+storage_proxy::mutate_streaming_mutation(const schema_ptr& s, const frozen_mutation& m) {
     auto shard = _db.local().shard_of(m);
     get_stats().replica_cross_shard_ops += shard != this_shard_id();
     // In theory streaming writes should have their own smp_service_group, but this is only used during upgrades from old versions; new
     // versions use rpc streaming.
     // TODO: We are bringing the streaming memtables, they MUST have their own smp_service_group!
-    return _db.invoke_on(shard, _write_smp_service_group, [&m, plan_id, fragmented, gs = global_schema_ptr(s)] (database& db) mutable -> future<utils::UUID> {
-        return db.apply_streaming_mutation(gs, plan_id, m, fragmented);
+    return _db.invoke_on(shard, _write_smp_service_group, [&m, gs = global_schema_ptr(s)] (database& db) mutable -> future<utils::UUID> {
+        return db.apply_streaming_mutation(gs, m);
     });
 }
 

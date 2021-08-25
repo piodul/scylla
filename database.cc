@@ -1939,16 +1939,16 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
     });
 }
 
-future<utils::UUID> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
+future<utils::UUID> database::apply_streaming_mutation(schema_ptr s, const frozen_mutation& m) {
     if (!s->is_synced()) {
         throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
-    return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, fragmented, plan_id] () mutable {
-        return _streaming_dirty_memory_manager.region_group().run_when_memory_available([this, &m, plan_id, fragmented, s = std::move(s)] {
+    return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m] () mutable {
+        return _streaming_dirty_memory_manager.region_group().run_when_memory_available([this, &m, s = std::move(s)] {
             auto uuid = m.column_family_id();
             auto& cf = find_column_family(uuid);
-            return cf.apply_streaming_mutation(s, plan_id, std::move(m), fragmented);
+            return cf.apply_streaming_mutation(s, std::move(m));
         }, db::no_timeout);
     });
 }
@@ -2137,6 +2137,14 @@ future<> database::flush_all_memtables() {
     return parallel_for_each(_column_families, [this] (auto& cfp) {
         return cfp.second->flush();
     });
+}
+
+future<> database::flush_all_streaming_memtables() {
+    // Let's not be as aggressive as flush_all_memtables
+    // as this function will be invoked during normal runtime
+    for (auto& cfp : _column_families) {
+        co_await cfp.second->flush_streaming_mutations();
+    }
 }
 
 future<> database::flush(const sstring& ksname, const sstring& cfname) {
