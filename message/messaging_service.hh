@@ -41,6 +41,7 @@
 #include "cache_temperature.hh"
 #include "service/paxos/prepare_response.hh"
 #include "raft/raft.hh"
+#include "db/hints/streaming/rpc_messages.hh"
 
 #include <list>
 #include <vector>
@@ -152,7 +153,8 @@ enum class messaging_verb : int32_t {
     RAFT_VOTE_REQUEST = 49,
     RAFT_VOTE_REPLY = 50,
     RAFT_TIMEOUT_NOW = 51,
-    LAST = 52,
+    HINT_STREAM = 52,
+    LAST = 53,
 };
 
 } // namespace netw
@@ -549,6 +551,11 @@ public:
     future<> unregister_hint_mutation();
     future<> send_hint_mutation(msg_addr id, clock_type::time_point timeout, const frozen_mutation& fm, inet_address_vector_replica_set forward,
         inet_address reply_to, unsigned shard, response_id_type response_id, std::optional<tracing::trace_info> trace_info = std::nullopt);
+
+    void register_hint_stream(std::function<future<rpc::tuple<db::hints::streaming::open_response, rpc::sink<db::hints::streaming::receiver_message>>> (const rpc::client_info& cinfo, db::hints::streaming::open_request req, rpc::source<db::hints::streaming::sender_message> source)>&& func);
+    future<> unregister_hint_stream();
+    future<std::tuple<rpc::sink<db::hints::streaming::sender_message>, rpc::source<db::hints::streaming::receiver_message>, db::hints::streaming::open_response>> make_sink_and_source_for_hint_stream(msg_addr id, db::hints::streaming::open_request req);
+    rpc::sink<db::hints::streaming::receiver_message> make_sink_for_hint_stream(rpc::source<db::hints::streaming::sender_message>& source);
 
     // RAFT verbs
     void register_raft_send_snapshot(std::function<future<raft::snapshot_reply> (const rpc::client_info&, rpc::opt_time_point, raft::group_id, raft::server_id from_id, raft::server_id dst_id, raft::install_snapshot)>&& func);

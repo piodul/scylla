@@ -66,6 +66,7 @@
 #include "idl/messaging_service.dist.hh"
 #include "idl/paxos.dist.hh"
 #include "idl/raft.dist.hh"
+#include "idl/hinted_handoff_streaming.dist.hh"
 #include "serializer_impl.hh"
 #include "serialization_visitors.hh"
 #include "idl/consistency_level.dist.impl.hh"
@@ -89,6 +90,7 @@
 #include "idl/messaging_service.dist.impl.hh"
 #include "idl/paxos.dist.impl.hh"
 #include "idl/raft.dist.impl.hh"
+#include "idl/hinted_handoff_streaming.dist.impl.hh"
 #include <seastar/rpc/lz4_compressor.hh>
 #include <seastar/rpc/lz4_fragmented_compressor.hh>
 #include <seastar/rpc/multi_algo_compressor_factory.hh>
@@ -569,6 +571,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPAIR_GET_FULL_ROW_HASHES_WITH_RPC_STREAM:
     case messaging_verb::NODE_OPS_CMD:
     case messaging_verb::HINT_MUTATION:
+    case messaging_verb::HINT_STREAM:
         return 1;
     case messaging_verb::CLIENT_ID:
     case messaging_verb::MUTATION:
@@ -1495,6 +1498,29 @@ future<> messaging_service::send_hint_mutation(msg_addr id, clock_type::time_poi
         inet_address reply_to, unsigned shard, response_id_type response_id, std::optional<tracing::trace_info> trace_info) {
     return send_message_oneway_timeout(this, timeout, messaging_verb::HINT_MUTATION, std::move(id), fm, std::move(forward),
         std::move(reply_to), shard, std::move(response_id), std::move(trace_info));
+}
+
+void messaging_service::register_hint_stream(std::function<future<rpc::tuple<db::hints::streaming::open_response, rpc::sink<db::hints::streaming::receiver_message>>> (const rpc::client_info& cinfo, db::hints::streaming::open_request req, rpc::source<db::hints::streaming::sender_message> source)>&& func) {
+    register_handler(this, netw::messaging_verb::HINT_STREAM, std::move(func));
+}
+future<> messaging_service::unregister_hint_stream() {
+    return unregister_handler(netw::messaging_verb::HINT_STREAM);
+}
+future<std::tuple<rpc::sink<db::hints::streaming::sender_message>, rpc::source<db::hints::streaming::receiver_message>, db::hints::streaming::open_response>> messaging_service::make_sink_and_source_for_hint_stream(msg_addr id, db::hints::streaming::open_request req) {
+    using value_type = std::tuple<rpc::sink<db::hints::streaming::sender_message>, rpc::source<db::hints::streaming::receiver_message>, db::hints::streaming::open_response>;
+    auto rpc_client = get_rpc_client(messaging_verb::HINT_STREAM, id);
+    return rpc_client->make_stream_sink<netw::serializer, db::hints::streaming::sender_message>().then([this, req = std::move(req), rpc_client] (rpc::sink<db::hints::streaming::sender_message> sink) mutable {
+        auto rpc_handler = rpc()->make_client<rpc::tuple<db::hints::streaming::open_response, rpc::source<db::hints::streaming::receiver_message>> (db::hints::streaming::open_request, rpc::sink<db::hints::streaming::sender_message>)>(messaging_verb::HINT_STREAM);
+        return rpc_handler(*rpc_client, std::move(req), sink).then_wrapped([sink, rpc_client] (future<rpc::tuple<db::hints::streaming::open_response, rpc::source<db::hints::streaming::receiver_message>>> response_and_source) mutable {
+            return (response_and_source.failed() ? sink.close() : make_ready_future<>()).then([sink = std::move(sink), response_and_source = std::move(response_and_source)] () mutable {
+                auto [resp, source] = std::move(response_and_source.get());
+                return make_ready_future<value_type>(value_type(std::move(sink), std::move(source), std::move(resp)));
+            });
+        });
+    });
+}
+rpc::sink<db::hints::streaming::receiver_message> messaging_service::make_sink_for_hint_stream(rpc::source<db::hints::streaming::sender_message>& source) {
+    return source.make_sink<netw::serializer, db::hints::streaming::receiver_message>();
 }
 
 void messaging_service::register_raft_send_snapshot(std::function<future<raft::snapshot_reply> (const rpc::client_info&, rpc::opt_time_point, raft::group_id gid, raft::server_id from_id, raft::server_id dst_id, raft::install_snapshot)>&& func) {
