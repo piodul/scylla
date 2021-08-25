@@ -78,6 +78,7 @@ public:
         assert(_listeners.empty());
     }
 
+    [[nodiscard("discarding the handle immediately unregisters the listener")]]
     handle register_listener(flush_listener* l) {
         assert(l != nullptr);
         _listeners.push_back(l);
