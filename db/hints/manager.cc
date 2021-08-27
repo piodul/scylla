@@ -45,6 +45,7 @@
 #include "mutation_partition_view.hh"
 #include "utils/runtime.hh"
 #include "utils/error_injection.hh"
+#include "db/hints/rp_comparator.hh"
 
 using namespace std::literals::chrono_literals;
 
@@ -56,36 +57,6 @@ const std::string manager::FILENAME_PREFIX("HintsLog" + commitlog::descriptor::S
 
 const std::chrono::seconds manager::hint_file_write_timeout = std::chrono::seconds(2);
 const std::chrono::seconds manager::hints_flush_period = std::chrono::seconds(10);
-
-/// A replay position comparator which prioritizes segment IDs from other shards.
-struct foreign_first_segment_id_comparator {
-    unsigned local_shard_id = this_shard_id();
-
-    bool operator()(const db::segment_id_type& a, const db::segment_id_type& b) const {
-        const unsigned shard_a = db::replay_position(a).shard_id();
-        const unsigned shard_b = db::replay_position(b).shard_id();
-
-        if (shard_a == shard_b) {
-            return a < b;
-        }
-
-        // Let S be the current shard, N - number of shards.
-        // Put shards in the following order:
-        //   (S + N - 1) % N
-        //   (S + N - 2) % N
-        //   ...
-        //   (S + 1) % N
-        //   S
-        // This will, hopefully, prevent a situation in which hints managers from
-        // all shards gang up on one shard and send hints to it at the same time.
-        // Of course, nothing will help us if all shards have foreign segments
-        // towards one shard only.
-
-        // Instead of using modulo, we can use unsigned underflow. Resulting values
-        // will have the same ordering as if modulo smp::count was used.
-        return (shard_a - local_shard_id) > (shard_b - local_shard_id);
-    }
-};
 
 manager::manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager& res_manager, distributed<database>& db)
     : _hints_dir(fs::path(hints_directory) / format("{:d}", this_shard_id()))
@@ -480,7 +451,7 @@ future<db::commitlog> manager::end_point_hints_manager::add_store() noexcept {
 
                 // Sort segments by their segment IDs, starting from those
                 // which are from foreign shards
-                foreign_first_segment_id_comparator cmp;
+                foreign_first_segment_id_comparator cmp(this_shard_id());
                 std::sort(segs_with_ids.begin(), segs_with_ids.end(), [cmp] (const auto& a, const auto& b) {
                     return cmp(a.first, b.first);
                 });

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <optional>
 #include "frozen_mutation.hh"
+#include "db/commitlog/replay_position.hh"
 #include "utils/UUID.hh"
 
 namespace db {
@@ -38,23 +39,24 @@ enum class protocol_version : uint32_t {
     v1 = 1,
 };
 
+enum class hints_type : uint8_t {
+    // Regular hints
+    regular = 0,
+
+    // Materialized view hints
+    mv = 1,
+};
+
 struct open_request {
     protocol_version version = protocol_version::v1;
-
-    // An ID which changes every time the node is restarted.
-    // Receiver caches this ID. If the stream is broken or closed,
-    // receiver will know if the node was restarted or not.
-    // Because information about hint progress is not persisted, it is used
-    // to identify if unconfirmed hints should be restarted.
-    utils::UUID cookie;
+    hints_type htype = hints_type::regular;
 };
 
 struct open_response {
-    // If true, then the cookie was known by the receiver.
-    // If it's not and it is not the first time the session between those
-    // two nodes was initiated, it might indicate that the node was restarted,
-    // so the sender will be informed that it must re-send unconfirmed hints.
-    bool cookie_known;
+    // An ID which changes every time the node is restarted.
+    // Sender caches the last seen ID. If it notices that the cookie
+    // has changed on reconnect, it indicates that the node has been restarted.
+    utils::UUID cookie;
 };
 
 enum class sender_message_type : uint8_t {
@@ -68,24 +70,40 @@ struct sender_message {
     sender_message_type type = sender_message_type::noop;
     uint64_t next_message_memory_reservation = 0;
 
+    // When the original destination for a hint is no longer its replica,
+    // we send it to all current replicas. We need to differentiate
+    // the original destinations because we use replay positions for tracking
+    // progress, and RPs from different hint queues do not mix.
+    gms::inet_address original_destination;
+
+    db::replay_position rp;
+
     // used for: mutation
     std::optional<frozen_mutation> fm;
+
+    std::optional<uint64_t> request_token;
 };
 
 enum class receiver_message_type : uint8_t {
-    // Contains stats about how many hints were saved to mmtables/sstables
+    // Contains stats about how many hints were saved to memtables/sstables
     status = 0,
 };
 
 struct receiver_message {
     receiver_message_type type = receiver_message_type::status;
 
-    // How many mutations were applied to memtables?
-    uint64_t applied_up_to = 0;
+    // Which endpoint this confirmation applies to?
+    gms::inet_address original_destination;
 
-    // What is the largest mutation number that all mutations before it were
-    // flushed to disk?
-    uint64_t flushed_up_to = 0;
+    // Up to which RP mutations were applied?
+    // If no hints were applied _on this connection_ yet, it will be zero
+    db::replay_position applied_up_to;
+
+    // Up to which RP mutations were persisted on disk?
+    // If no hints were persisted _on this connection_ yet, it will be zero
+    db::replay_position flushed_up_to;
+
+    std::optional<uint64_t> response_token;
 };
 
 }

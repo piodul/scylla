@@ -38,12 +38,16 @@ namespace db {
 namespace hints {
 namespace streaming {
 
-future<> receiver_service::endpoint_session::send_status_report(netw::msg_addr from, rpc::sink<receiver_message> sink) {
+future<> receiver_service::endpoint_session::send_status_report(netw::msg_addr from, gms::inet_address source, rpc::sink<receiver_message> sink) {
     receiver_message resp {
         .type = receiver_message_type::status,
-        .applied_up_to = applied_mutation_count,
-        .flushed_up_to = lowest_ids.empty() ? applied_mutation_count : *lowest_ids.begin(),
     };
+
+    if (auto it = per_source_state.find(source); it != per_source_state.end()) {
+        source_state& state = it->second;
+        resp.applied_up_to = state.applied_up_to;
+        resp.flushed_up_to = state.get_flushed_up_to();
+    }
 
     hslogger.trace("[{}] Reporting: {} mutations applied, {} flushed", from, resp.applied_up_to, resp.flushed_up_to);
     return sink(std::move(resp));
@@ -83,22 +87,25 @@ future<> receiver_service::endpoint_session::run_rpc_stream_task(
             {
                 hslogger.trace("[{}] Received mutation message, size={}", from, msg.fm->representation().size());
 
+                source_state& state = per_source_state.try_emplace(msg.original_destination, from.cpu_id).first->second;
+
                 const schema_ptr s = co_await mm.get_schema_for_write(msg.fm->schema_version(), from, ms);
                 const memtable::id mtbl_id = co_await sp.mutate_streaming_mutation(s, *msg.fm);
-                const uint64_t hint_id = applied_mutation_count++;
 
-                if (!memtable_to_lowest_id.contains(mtbl_id)) {
-                    memtable_to_lowest_id[mtbl_id] = hint_id;
-                    lowest_ids.insert(hint_id);
+                state.applied_up_to = msg.rp;
+
+                if (!state.memtable_to_lowest_rp.contains(mtbl_id)) {
+                    state.memtable_to_lowest_rp[mtbl_id] = state.applied_up_to;
+                    state.lowest_rps.insert(state.applied_up_to);
                 }
 
-                hslogger.trace("[{}] Put mutation #{} into memtable with ID {}", from, mtbl_id, hint_id);
+                hslogger.trace("[{}] Put mutation #{} into memtable with RP={}, source={}", from, mtbl_id, msg.rp, msg.original_destination);
             }
             break;
         
         case sender_message_type::status_request:
-            hslogger.trace("[{}] Received status_request message", from);
-            co_await send_status_report(from, sink);
+            hslogger.trace("[{}] Received status_request message, source={}", from, msg.original_destination);
+            co_await send_status_report(from, msg.original_destination, sink);
             break;
         
         case sender_message_type::flush_request:
@@ -119,7 +126,9 @@ future<> receiver_service::endpoint_session::run_rpc_stream_task(
         hslogger.info("[{}] Flushing streaming memtables because of shutdown", from);
         co_await db.flush_all_streaming_memtables();
         hslogger.info("[{}] Flushing complete", from);
-        co_await send_status_report(from, sink);
+        co_await parallel_for_each(per_source_state, [this, from, &sink] (auto& p) {
+            return send_status_report(from, p.first, sink);
+        });
     }
 
     co_return;
@@ -130,35 +139,33 @@ void receiver_service::register_rpc_verbs(netw::messaging_service& ms, service::
             -> future<rpc::tuple<open_response, rpc::sink<receiver_message>>> {
 
         if (req.version != protocol_version::v1) {
-            throw std::runtime_error("unsupported protocol version");
+            throw std::runtime_error(format("unsupported protocol version: {}", uint32_t(req.version)));
+        }
+
+        if (req.htype != hints_type::regular && req.htype != hints_type::mv) {
+            throw std::runtime_error(format("unsupported hints type: {}", uint32_t(req.htype)));
         }
 
         const auto from = netw::messaging_service::get_source(cinfo);
-        auto p = std::pair<gms::inet_address, uint32_t>(from.addr, from.cpu_id);
+        auto t = std::tuple<gms::inet_address, uint32_t, hints_type>(from.addr, from.cpu_id, req.htype);
 
-        bool cookie_known = false;
         auto& sess = [&] () -> endpoint_session& {
-            if (auto it = _sessions.find(p); it != _sessions.end()) {
+            if (auto it = _sessions.find(t); it != _sessions.end()) {
                 // We don't allow more than one RPC session for a given endpoint
                 if (it->second.has_active_rpc()) {
                     throw std::runtime_error("a session is already present for this endpoint");
-                }
-
-                if (it->second.sender_cookie == req.cookie) {
-                    cookie_known = true;
-                    return it->second;
                 }
 
                 // Wrong cookie, we have to invalidate the old session
                 _sessions.erase(it);
             }
 
-            return _sessions.try_emplace(p, req.cookie).first->second;
+            return _sessions.try_emplace(t).first->second;
         }();
 
         auto sink = ms.make_sink_for_hint_stream(source);
 
-        hslogger.info("Connected with {}, cookie={}, cookie_known={}", from, req.cookie, cookie_known);
+        hslogger.info("Connected with {}", from);
 
         // Waited on in receiver_service::stop()
         (void)with_gate(_rpc_stream_gate, [&] () {
@@ -169,17 +176,14 @@ void receiver_service::register_rpc_verbs(netw::messaging_service& ms, service::
                 } else {
                     hslogger.warn("Connection with {} was closed due to an error: {}", from, f.get_exception());
                 }
-                sess.stop_flag = nullptr;
-                try {
-                    co_await sink.close();
-                } catch (...) {
-                    hslogger.warn("Failed to close sink to {}: {}", from, std::current_exception());
-                }
-            }).discard_result();
+                return sink.close().handle_exception([from] (auto ep) {
+                    hslogger.warn("Failed to close sink to {}: {}", from, ep);
+                });
+            }).finally([&sess] { sess.stop_flag = nullptr; });
         });
 
         open_response resp {
-            .cookie_known = cookie_known,
+            .cookie = _cookie,
         };
         co_return rpc::tuple<open_response, rpc::sink<receiver_message>>{resp, sink};
     });
@@ -193,12 +197,16 @@ void receiver_service::on_successful_flush(memtable::id id) {
     // Waited in receiver_service::stop()
     (void)with_gate(_flush_report_gate, [this, id] {
         // Because of cross-shard hints, we need to check on all shards
+        // TODO: Pre-emptions? This may take long
+        // Or just write an algorithm with better time complexity
         return container().invoke_on_all([id] (receiver_service& rs) {
             for (auto& [key, sess] : rs._sessions) {
-                if (auto it = sess.memtable_to_lowest_id.find(id); it != sess.memtable_to_lowest_id.end()) {
-                    uint64_t lowest_id = it->second;
-                    sess.memtable_to_lowest_id.erase(it);
-                    sess.lowest_ids.erase(lowest_id);
+                for (auto& [key2, state] : sess.per_source_state) {
+                    if (auto it = state.memtable_to_lowest_rp.find(id); it != state.memtable_to_lowest_rp.end()) {
+                        auto lowest_rp = it->second;
+                        state.memtable_to_lowest_rp.erase(it);
+                        state.lowest_rps.erase(lowest_rp);
+                    }
                 }
             }
         });

@@ -29,6 +29,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/rpc/rpc_types.hh>
 #include "db/commitlog/replay_position.hh"
+#include "db/hints/rp_comparator.hh"
 #include "db/hints/streaming/rpc_messages.hh"
 #include "db/flush_listener.hh"
 #include "message/msg_addr.hh"
@@ -49,7 +50,8 @@ namespace db {
 namespace hints {
 namespace streaming {
 
-// TODO: Should very old sessions clean themselves up after a long time?
+// TODO: Should very old and inactive sessions clean themselves up after a long time?
+// TODO: Metrics
 
 class receiver_service final
         : public seastar::async_sharded_service<receiver_service>
@@ -64,32 +66,38 @@ private:
     // the progress is not lost on temporary network failure.
     struct endpoint_session {
     public:
-        // An identifier provided by the sender on the last connect.
-        // On next reconnect, if it changes, it means that the session
-        // needs to be invalidated.
-        utils::UUID sender_cookie;
-
         // If non-null, there is an active rpc connection operating on this session.
         // The boolean can be used to tell the session to stop itself.
         lw_shared_ptr<bool> stop_flag;
 
-        // How many mutations were applied to memtables?
-        uint64_t applied_mutation_count = 0;
+        struct source_state {
+            db::replay_position applied_up_to;
 
-        // For each memtable, what is the lowest ID of a mutation included in it?
-        std::unordered_map<memtable::id, uint64_t> memtable_to_lowest_id;
+            // For each memtable, what is the lowest ID of a mutation included in it?
+            std::unordered_map<memtable::id, db::replay_position> memtable_to_lowest_rp;
 
-        // Contains IDs from `memtable_to_lowest_id`, sorted
-        std::set<uint64_t> lowest_ids;
+            // Contains IDs from `memtable_to_lowest_rp`, sorted
+            std::set<db::replay_position, foreign_first_rp_comparator> lowest_rps;
+
+            db::replay_position get_flushed_up_to() const {
+                if (lowest_rps.empty()) {
+                    return applied_up_to;
+                }
+
+                db::replay_position rp = *lowest_rps.begin();
+                rp.pos--;
+                return rp;
+            }
+
+            source_state(unsigned shard_id) : lowest_rps(foreign_first_rp_comparator{shard_id}) {}
+        };
+
+        std::unordered_map<gms::inet_address, source_state> per_source_state;
     
     private:
-        future<> send_status_report(netw::msg_addr from, rpc::sink<receiver_message> sink);
+        future<> send_status_report(netw::msg_addr from, gms::inet_address source, rpc::sink<receiver_message> sink);
 
     public:
-        inline endpoint_session(const utils::UUID& sender_cookie)
-                : sender_cookie(sender_cookie)
-        {}
-
         inline bool has_active_rpc() const {
             return bool(stop_flag);
         }
@@ -112,7 +120,9 @@ private:
     // connected to one receiver shard, either one would block another because
     // we don't allow two sessions at the same time from the same source, or
     // they will invalidate each other's sessions (because of different cookies).
-    std::unordered_map<std::pair<gms::inet_address, uint32_t>, endpoint_session, utils::tuple_hash> _sessions;
+    std::unordered_map<std::tuple<gms::inet_address, uint32_t, hints_type>, endpoint_session, utils::tuple_hash> _sessions;
+
+    utils::UUID _cookie;
 
     db::flush_listener_list::handle _flush_listener_registration;
     seastar::gate _rpc_stream_gate;

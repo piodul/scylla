@@ -27,13 +27,18 @@ enum class protocol_version : uint32_t {
     v1 = 1,
 };
 
+enum class hints_type : uint8_t {
+    regular = 0,
+    mv = 1,
+};
+
 struct open_request {
     db::hints::streaming::protocol_version version;
-    utils::UUID cookie;
+    db::hints::streaming::hints_type htype;
 };
 
 struct open_response {
-    bool cookie_known;
+    utils::UUID cookie;
 };
 
 enum class sender_message_type : uint8_t {
@@ -46,7 +51,10 @@ enum class sender_message_type : uint8_t {
 struct sender_message {
     db::hints::streaming::sender_message_type type;
     uint64_t next_message_memory_reservation;
+    gms::inet_address original_destination;
+    db::replay_position rp;
     std::optional<frozen_mutation> fm;
+    std::optional<uint64_t> request_token;
 };
 
 enum class receiver_message_type : uint8_t {
@@ -55,8 +63,10 @@ enum class receiver_message_type : uint8_t {
 
 struct receiver_message {
     db::hints::streaming::receiver_message_type type;
-    uint64_t applied_up_to;
-    uint64_t flushed_up_to;
+    gms::inet_address original_destination;
+    db::replay_position applied_up_to;
+    db::replay_position flushed_up_to;
+    std::optional<uint64_t> response_token;
 };
 
 }

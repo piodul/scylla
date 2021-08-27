@@ -66,6 +66,7 @@
 #include "idl/messaging_service.dist.hh"
 #include "idl/paxos.dist.hh"
 #include "idl/raft.dist.hh"
+#include "idl/replay_position.dist.hh"
 #include "idl/hinted_handoff_streaming.dist.hh"
 #include "serializer_impl.hh"
 #include "serialization_visitors.hh"
@@ -90,6 +91,7 @@
 #include "idl/messaging_service.dist.impl.hh"
 #include "idl/paxos.dist.impl.hh"
 #include "idl/raft.dist.impl.hh"
+#include "idl/replay_position.dist.impl.hh"
 #include "idl/hinted_handoff_streaming.dist.impl.hh"
 #include <seastar/rpc/lz4_compressor.hh>
 #include <seastar/rpc/lz4_fragmented_compressor.hh>
