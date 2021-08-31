@@ -20,126 +20,157 @@
  */
 
 #include <algorithm>
+#include <limits>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/map_reduce.hh>
 #include "database.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "message/messaging_service.hh"
 #include "db/hints/streaming/sender.hh"
+#include "db/hints/streaming/task_map.hh"
 
 namespace db {
 namespace hints {
 namespace streaming {
 
-class min_rp_reducer {
-private:
-    const foreign_first_rp_comparator _comparator;
-    db::replay_position _result;
-
-public:
-    min_rp_reducer(unsigned shard_id) : _comparator(shard_id) {}
-
-    void operator()(db::replay_position rp) {
-        if (_result == db::replay_position{} || _comparator(rp, _result)) {
-            _result = rp;
-        }
-    }
-
-    db::replay_position get() const {
-        return _result;
-    }
-};
-
-future<> sender_proxy::rpc_session::run_receiver(rpc::source<receiver_message> source) {
-    while (true) {
-        auto msg_opt = co_await source();
-        if (!msg_opt) {
-            break;
-        }
-        auto& [msg] = *msg_opt;
-
-        // TODO: Verify that the received message type is known
-        // Now assume that it's a status report
-
-        if (!msg.response_token.has_value()) {
-            // TODO: For now we ignore messages issued by the other side
-            continue;
-        }
-
-        if (auto it = _pending_requests.find(*msg.response_token); it != _pending_requests.end()) {
-            replay_status rs {
-                .applied_up_to = msg.applied_up_to,
-                .flushed_up_to = msg.flushed_up_to,
-            };
-
-            it->second.set_value(rs);
-            _pending_requests.erase(it);
-        }
-    }
+static uint64_t lower_id(uint64_t a, uint64_t b)  {
+    return std::min(a, b);
 }
 
-sender_proxy::rpc_session::rpc_session(rpc::source<receiver_message> source, rpc::sink<sender_message> sink)
-        : _sink(std::move(sink)) {
-
-    _finished = run_receiver(std::move(source));
+sender_proxy::rpc_session::rpc_session(utils::UUID cookie, rpc::sink<sender_message> sink, rpc::source<receiver_message> source)
+        : _sink(std::move(sink))
+        , _source(std::move(source))
+        , _cookie(cookie) {
 }
 
-future<lw_shared_ptr<sender_proxy::rpc_session>> sender_proxy::rpc_session::open(gms::inet_address ep, hints_type htype, netw::messaging_service& ms) {
+future<lw_shared_ptr<sender_proxy::rpc_session>> sender_proxy::rpc_session::start(netw::messaging_service& ms, gms::inet_address addr) {
     open_request req {
         .version = protocol_version::v1,
-        .htype = htype,
     };
 
-    auto [sink, source, resp] = co_await ms.make_sink_and_source_for_hint_stream(netw::msg_addr { ep, 0 }, req);
-    co_return make_lw_shared<rpc_session>(std::move(source), std::move(sink));
+    auto [sink, source, resp] = co_await ms.make_sink_and_source_for_hint_stream(netw::msg_addr { addr, 0 }, req);
+    co_return make_lw_shared<rpc_session>(resp.cookie, std::move(sink), std::move(source));
 }
 
-future<> sender_proxy::rpc_session::send_message(const sender_message& msg) {
-    return _sink(msg);
+future<> sender_proxy::rpc_session::run() {
+    _stopped = shared_future<>(do_run());
+    _closed.emplace();
+    return _closed->get_future();
 }
 
-future<replay_status> sender_proxy::rpc_session::query_status(gms::inet_address original_destination) {
-    const uint64_t request_id = _next_request_id++;
-    sender_message msg {
-        .type = sender_message_type::status_request,
-        .original_destination = original_destination,
-        .request_token = request_id,
-    };
-
-    promise<replay_status> p;
-    auto f = p.get_future();
-    _pending_requests.insert_or_assign(request_id, std::move(p));
-
+future<> sender_proxy::rpc_session::do_run() {
     try {
-        co_await _sink(msg);
+        while (true) {
+            auto msg_opt = co_await _source();
+            if (!msg_opt) {
+                break;
+            }
+            auto& [msg] = *msg_opt;
+
+            if (msg.type == receiver_message_type::close_request) {
+                close();
+                continue;
+            }
+
+            if (!msg.response_token.has_value()) {
+                // TODO: For now we ignore messages issued by the other side
+                continue;
+            }
+
+            if (auto it = _pending_requests.find(*msg.response_token); it != _pending_requests.end()) {
+                it->second.set_value(std::move(msg));
+                _pending_requests.erase(it);
+            } else {
+                // TODO: Warning about unknown IDs
+            }
+        }
     } catch (...) {
-        _pending_requests.erase(request_id);
-        // TODO: What to do with the future f here?
-        throw;
+        // TODO: Log the exception
+        // eptr = std::current_exception();
     }
-
-    co_return co_await std::move(f);
-}
-
-future<> sender_proxy::rpc_session::request_flush() {
-    sender_message msg {
-        .type = sender_message_type::flush_request,
-    };
-    return _sink(msg);
-}
-
-future<> sender_proxy::rpc_session::close() {
-    co_await _sink.close();
-    co_await std::move(_finished);
 
     for (auto& [id, p] : _pending_requests) {
         p.set_exception(rpc::closed_error{});
     }
 }
 
-sender_proxy::sender_proxy(hints_type htype, netw::messaging_service& ms)
-        : _ms(ms)
-        , _htype(htype) {
+void sender_proxy::rpc_session::close() {
+    // Prevent us from sending more
+    // The other side will notice that the stream is closed and will close its half
+    // Then we will read all messages from source and stop
+    if (_closed.has_value()) {
+        // TODO: What to do with the exception?
+        // Indirectly waited
+        (void)_sink.close().handle_exception([] (std::exception_ptr) {}).forward_to(std::move(*_closed));
+        _closed.reset();
+    }
+}
+
+future<> sender_proxy::rpc_session::stop() {
+    close();
+    return _stopped.get_future();
+}
+
+bool sender_proxy::rpc_session::is_closed() const {
+    return _closed.has_value();
+}
+
+future<> sender_proxy::rpc_session::send_message(const sender_message& msg) {
+    try {
+        co_return co_await _sink(msg);
+    } catch (...) {
+        close();
+        throw;
+    }
+}
+
+future<receiver_message> sender_proxy::rpc_session::send_request(sender_message& request) {
+    const uint64_t request_id = _next_request_id++;
+    request.request_token = request_id;
+    auto it = _pending_requests.insert_or_assign(request_id, promise<receiver_message>()).first;
+
+    try {
+        co_await send_message(request);
+        co_return co_await it->second.get_future();
+    } catch (...) {
+        _pending_requests.erase(request_id);
+        throw;
+    }
+}
+
+future<replay_status> sender_proxy::rpc_session::query_status() {
+    sender_message request {
+        .type = sender_message_type::status_request,
+    };
+    auto response = co_await send_request(request);
+
+    if (response.type != receiver_message_type::status) {
+        throw std::runtime_error(format("bad response type for a status request: {}", uint32_t(response.type)));
+    }
+
+    co_return replay_status {
+        .applied_up_to = response.applied_up_to,
+        .flushed_up_to = response.flushed_up_to,
+    };
+}
+
+future<> sender_proxy::rpc_session::request_flush() {
+    sender_message request {
+        .type = sender_message_type::flush_request,
+    };
+    auto response = co_await send_request(request);
+
+    if (response.type != receiver_message_type::flush_done) {
+        throw std::runtime_error(format("bad response type for a status request: {}", uint32_t(response.type)));
+    }
+}
+
+const utils::UUID& sender_proxy::rpc_session::get_cookie() const {
+    return _cookie;
+}
+
+sender_proxy::sender_proxy(netw::messaging_service& ms)
+        : _ms(ms) {
     // Nothing, for now
 }
 
@@ -153,25 +184,15 @@ future<> sender_proxy::start() {
 }
 
 future<> sender_proxy::stop() {
-    // TODO
-    co_return;
+    _stopped = true;
+    return _sessions.stop();
 }
 
 future<lw_shared_ptr<sender_proxy::rpc_session>> sender_proxy::get_or_create_session(gms::inet_address ep) {
-    if (auto it = _sessions.find(ep); it != _sessions.end()) {
-        return make_ready_future<lw_shared_ptr<rpc_session>>(it->second);
+    if (_stopped) {
+        throw std::runtime_error("hints sender proxy is stopped");
     }
-    auto [it, inserted] = _pending_sessions.try_emplace(ep);
-    if (!inserted) {
-        return it->second.get_future();
-    }
-    it->second = rpc_session::open(ep, _htype, _ms);
-    return it->second.get_future().then([this, ep] (auto rpcs) {
-        _sessions.insert_or_assign(ep, rpcs);
-        return rpcs;
-    }).finally([this, ep] {
-        _pending_sessions.erase(ep);
-    });
+    co_return co_await _sessions.get_or_start(ep, _ms, ep);
 }
 
 one_owner_sender::one_owner_sender(locator::token_metadata_ptr token_metadata, sender_proxy& proxy, gms::inet_address main_destination)
@@ -181,12 +202,12 @@ one_owner_sender::one_owner_sender(locator::token_metadata_ptr token_metadata, s
     // Nothing, for now
 }
 
-future<db::replay_position> one_owner_sender::refresh_connections() {
+future<uint64_t> one_owner_sender::refresh_connections() {
     return map_reduce(_ep_states.begin(), _ep_states.end(), [this] (auto& p) {
         auto& [ep, state] = p;
-        if (state.cached_session) {
+        if (!state.cached_session->is_closed()) {
             // Connection should be usable
-            return make_ready_future<db::replay_position>(state.applied_up_to);
+            return make_ready_future<uint64_t>(state.applied_up_to);
         }
 
         // The connection broke, so we need to re-create it
@@ -200,9 +221,9 @@ future<db::replay_position> one_owner_sender::refresh_connections() {
             // Unconfirmed hints must be considered lost
             state.sent_up_to = state.applied_up_to;
             state.cached_session = std::move(new_ptr);
-            return make_ready_future<db::replay_position>(state.applied_up_to);
+            return make_ready_future<uint64_t>(state.applied_up_to);
         });
-    }, min_rp_reducer{this_shard_id()});
+    }, std::numeric_limits<uint64_t>::max(), lower_id);
 }
 
 // Calculate endpoints appropriate for this mutation.
@@ -235,126 +256,86 @@ static inet_address_vector_replica_set calculate_endpoints_for_mutation(
     return natural_endpoints;
 }
 
-future<> one_owner_sender::send_mutation(database& db, db::replay_position rp, frozen_mutation_and_schema&& fms) {
+future<uint64_t> one_owner_sender::send_mutation(database& db, frozen_mutation_and_schema&& fms) {
     const auto eps = calculate_endpoints_for_mutation(db, _token_metadata, _main_destination, fms);
-
+    const uint64_t mutation_id = _next_mutation_id++;
     sender_message msg {
         .type = sender_message_type::mutation,
-        .original_destination = _main_destination,
-        .rp = rp,
+        .mutation_id = mutation_id,
         .fm = std::move(fms.fm),
     };
 
     // Send the mutation to all applicable endpoints
-    // The coroutine will keep the frozen mutation alive
-    co_await parallel_for_each(eps, [this, &msg, rp] (gms::inet_address ep) {
-        return futurize_invoke([this, ep, rp] () {
-            if (auto it = _ep_states.find(ep); it != _ep_states.end()) {
-                return make_ready_future<endpoint_state*>(&it->second);
-            }
+    // TODO: Consider creating connections/sessions in parallel
+    // Mutations can be sent sequentially - we don't wait for confirmation
+    // and we don't want to use too much memory by materializing the mutations
 
-            // Try opening a new connection
-            return _proxy.get_or_create_session(ep).then([this, rp, ep] (lw_shared_ptr<sender_proxy::rpc_session> rpcs) {
-                // TODO: Does this always work?
-                db::replay_position prev_rp = rp;
-                --prev_rp.pos;
-
-                // Insert a new session
-                endpoint_state& state = _ep_states.insert_or_assign(ep, endpoint_state{prev_rp}).first->second;
-                state.cached_cookie = rpcs->get_cookie();
-                state.cached_session = std::move(rpcs);
-                return make_ready_future<endpoint_state*>(&state);
-            });
-        }).then([this, &msg, ep, rp] (endpoint_state* state) {
-            // TODO: This can be a separate function
-            if (!state->cached_session) {
-                return make_exception_future<>(std::runtime_error(format("sender session broke for {}", ep)));
-            }
-
-            const foreign_first_rp_comparator cmp{this_shard_id()};
-            if (cmp(rp, state->sent_up_to)) {
-                // We already replayed this mutation there, so skip
-                return make_ready_future<>();
-            }
-
-            return state->cached_session->send_message(msg).then([this, state, rp] {
-                state->sent_up_to = rp;
-            }).handle_exception([this, state] (std::exception_ptr eptr) {
-                // Clear the connection
-                return state->cached_session->close().finally([this, &state] {
-                    state->cached_session.release();
-                }).then([eptr = std::move(eptr)] {
-                    return make_exception_future<>(std::move(eptr));
-                });
-            });
+    // Get all relevant sessions (in parallel)
+    utils::small_vector<std::pair<gms::inet_address, endpoint_state*>, 3> states;
+    states.reserve(eps.size());
+    co_await parallel_for_each(eps, [this, mutation_id, &states] (gms::inet_address ep) {
+        if (auto it = _ep_states.find(ep); it != _ep_states.end()) {
+            // Get existing endpoint state
+            states.push_back({ep, &it->second});
+            return make_ready_future<>();
+        }
+        // Create an rpc session
+        return _proxy.get_or_create_session(ep).then([this, mutation_id, ep, &states] (lw_shared_ptr<sender_proxy::rpc_session> rpcs) {
+            // Create the endpoint state
+            endpoint_state& state = _ep_states.insert_or_assign(ep, endpoint_state{mutation_id - 1}).first->second;
+            state.cached_cookie = rpcs->get_cookie();
+            state.cached_session = std::move(rpcs);
+            states.push_back({ep, &state});
         });
     });
+
+    // TODO: Explain in more detail
+    // We don't want to use too much memory, so we are sending sequentially
+    const foreign_first_rp_comparator cmp{this_shard_id()};
+    for (auto [ep, state] : states) {
+        co_await state->cached_session->send_message(msg);
+        state->sent_up_to = mutation_id;
+    }
+
+    co_return mutation_id;
 }
 
 future<> one_owner_sender::request_flush() {
     return parallel_for_each(_ep_states, [this] (auto& p) {
-        endpoint_state& state = p.second;
-        if (!state.cached_session) {
-            return make_exception_future<>(std::runtime_error(format("sender session broke for {}", p.first)));
-        }
-
-        return state.cached_session->request_flush().handle_exception([this, &state] (std::exception_ptr eptr) {
-            // Clear the connection
-            return state.cached_session->close().finally([this, &state] {
-                state.cached_session.release();
-            }).then([eptr = std::move(eptr)] {
-                return make_exception_future<>(std::move(eptr));
-            });
-        });
+        return p.second.cached_session->request_flush();
     });
 }
 
-future<db::replay_position> one_owner_sender::query_status() {
-    return map_reduce(_ep_states.begin(), _ep_states.end(), [this] (auto& p) {
+future<uint64_t> one_owner_sender::query_status() {
+    std::vector<gms::inet_address> fully_flushed_eps;
+
+    auto flushed_up_to_rp = co_await map_reduce(_ep_states.begin(), _ep_states.end(), [this, &fully_flushed_eps] (auto& p) {
         endpoint_state& state = p.second;
-        if (!state.cached_session) {
-            return make_exception_future<db::replay_position>(std::runtime_error(format("sender session broke for {}", p.first)));
-        }
-
-        return state.cached_session->query_status(_main_destination).then([this, &state] (replay_status rs) {
-            const foreign_first_rp_comparator cmp{this_shard_id()};
-            if (state.applied_up_to == db::replay_position{} || cmp(rs.applied_up_to, state.applied_up_to)) {
-                state.applied_up_to = rs.applied_up_to;
-            }
-            if (state.flushed_up_to == db::replay_position{} || cmp(rs.flushed_up_to, state.flushed_up_to)) {
-                state.flushed_up_to = rs.flushed_up_to;
-            }
+        return state.cached_session->query_status().then([this, ep = p.first, &state, &fully_flushed_eps] (replay_status rs) {
+            state.applied_up_to = std::min(state.applied_up_to, rs.applied_up_to);
+            state.flushed_up_to = std::min(state.flushed_up_to, rs.flushed_up_to);
             return state.flushed_up_to;
-        }).handle_exception([this, &state] (std::exception_ptr eptr) {
-            // Clear the connection
-            return state.cached_session->close().finally([this, &state] {
-                state.cached_session.release();
-            }).then([eptr = std::move(eptr)] {
-                return make_exception_future<db::replay_position>(std::move(eptr));
-            });
         });
-    }, min_rp_reducer{this_shard_id()});
+    }, std::numeric_limits<uint64_t>::max(), lower_id);
+
+    std::erase_if(_ep_states, [] (auto& p) {
+        return p.second.flushed_up_to == p.second.applied_up_to;
+    });
+
+    co_return flushed_up_to_rp == std::numeric_limits<uint64_t>::max() ? 0 : flushed_up_to_rp;
 }
 
-db::replay_position one_owner_sender::get_flush_position() const {
-    min_rp_reducer reducer{this_shard_id()};
-    for (auto& [ep, state] : _ep_states) {
-        reducer(state.flushed_up_to);
+uint64_t one_owner_sender::get_flush_position() const {
+    if (_ep_states.empty()) {
+        return 0;
     }
-    return reducer.get();
+
+    uint64_t min = std::numeric_limits<uint64_t>::max();
+    for (auto& [ep, state] : _ep_states) {
+        min = std::min(min, state.flushed_up_to);
+    }
+    return min;
 }
-
-// future<> sender_proxy::send_mutation(database& db, db::replay_position rp, gms::inet_address original_destination, frozen_mutation_and_schema fms) {
-//     const auto eps = calculate_endpoints_for_mutation(db, _shared_token_metadata.get(), original_destination, fms);
-
-//     // Send the mutation to all applicable endpoints
-//     // The coroutine will keep the frozen mutation alive
-//     co_await parallel_for_each(eps, [this, &fms] (gms::inet_address ep) -> future<> {
-//         return get_or_create_session(ep).then([&fms] (lw_shared_ptr<rpc_session> rpcs) {
-//             return rpcs->send_mutation(fms.fm);
-//         });
-//     });
-// }
 
 }
 }

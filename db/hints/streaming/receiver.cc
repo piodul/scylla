@@ -27,30 +27,26 @@
 #include "service/migration_manager.hh"
 #include "service/storage_proxy.hh"
 #include "database.hh"
+#include "utils/UUID_gen.hh"
 #include "db/hints/streaming/receiver.hh"
 
 // TODO: Logging
 // TODO: Differentiate MV hints from non-MV hints
 
-static logging::logger hslogger("hints_streaming");
+static logging::logger hslogger("hints_streaming_receiver");
 
 namespace db {
 namespace hints {
 namespace streaming {
 
-future<> receiver_service::endpoint_session::send_status_report(netw::msg_addr from, gms::inet_address source, rpc::sink<receiver_message> sink) {
+future<> receiver_service::endpoint_session::send_status_report(netw::msg_addr from) {
     receiver_message resp {
         .type = receiver_message_type::status,
+        .applied_up_to = _applied_up_to,
+        .flushed_up_to = get_flushed_up_to(),
     };
-
-    if (auto it = per_source_state.find(source); it != per_source_state.end()) {
-        source_state& state = it->second;
-        resp.applied_up_to = state.applied_up_to;
-        resp.flushed_up_to = state.get_flushed_up_to();
-    }
-
     hslogger.trace("[{}] Reporting: {} mutations applied, {} flushed", from, resp.applied_up_to, resp.flushed_up_to);
-    return sink(std::move(resp));
+    return _sink(resp);            
 }
 
 // TODO: Add function for message type -> message name as string conversion
@@ -61,77 +57,148 @@ future<> receiver_service::endpoint_session::run_rpc_stream_task(
     service::migration_manager& mm,
     netw::messaging_service& ms,
     database& db,
-    rpc::source<sender_message> source,
-    rpc::sink<receiver_message> sink
+    rpc::source<sender_message> source
 ) {
-    while (!*stop_flag) {
-        auto msg_opt = co_await source();
-        if (!msg_opt.has_value()) {
-            hslogger.trace("[{}] Reached end of stream", from);
-            break;
-        }
-        auto& [msg] = *msg_opt;
-
-        if (msg.type == sender_message_type::mutation && !msg.fm.has_value()) {
-            throw std::runtime_error("mutation data missing for `mutation` message");
-        } else if (msg.type != sender_message_type::mutation && msg.fm.has_value()) {
-            throw std::runtime_error(format("mutation data present for non-`mutation` message ({})", uint32_t(msg.type)));
-        }
-
-        switch (msg.type) {
-        case sender_message_type::noop:
-            hslogger.trace("[{}] Received noop message", from);
-            break; // Do nothing, don't reserve memory yet
-
-        case sender_message_type::mutation:
-            {
-                hslogger.trace("[{}] Received mutation message, size={}", from, msg.fm->representation().size());
-
-                source_state& state = per_source_state.try_emplace(msg.original_destination, from.cpu_id).first->second;
-
-                const schema_ptr s = co_await mm.get_schema_for_write(msg.fm->schema_version(), from, ms);
-                const memtable::id mtbl_id = co_await sp.mutate_streaming_mutation(s, *msg.fm);
-
-                state.applied_up_to = msg.rp;
-
-                if (!state.memtable_to_lowest_rp.contains(mtbl_id)) {
-                    state.memtable_to_lowest_rp[mtbl_id] = state.applied_up_to;
-                    state.lowest_rps.insert(state.applied_up_to);
-                }
-
-                hslogger.trace("[{}] Put mutation #{} into memtable with RP={}, source={}", from, mtbl_id, msg.rp, msg.original_destination);
+    try {
+        while (true) {
+            auto msg_opt = co_await source();
+            if (!msg_opt.has_value()) {
+                hslogger.trace("[{}] Reached end of stream", from);
+                break;
             }
-            break;
-        
-        case sender_message_type::status_request:
-            hslogger.trace("[{}] Received status_request message, source={}", from, msg.original_destination);
-            co_await send_status_report(from, msg.original_destination, sink);
-            break;
-        
-        case sender_message_type::flush_request:
-            // TODO: Implement coalescing flushes
-            // TODO: Consider doing this asynchronously
-            hslogger.trace("[{}] Received flush_request message", from);
-            hslogger.info("[{}] Flushing streaming memtables", from);
-            co_await db.flush_all_streaming_memtables();
-            hslogger.info("[{}] Flushing complete", from);
-            break;
+            auto& [msg] = *msg_opt;
 
-        default:
-            throw std::runtime_error(format("unknown message type: {}", uint8_t(msg.type)));
+            if (msg.type == sender_message_type::mutation && !msg.fm.has_value()) {
+                throw std::runtime_error("mutation data missing for `mutation` message");
+            } else if (msg.type != sender_message_type::mutation && msg.fm.has_value()) {
+                throw std::runtime_error(format("mutation data present for non-`mutation` message ({})", uint32_t(msg.type)));
+            }
+
+            switch (msg.type) {
+            case sender_message_type::noop:
+                hslogger.trace("[{}] Received noop message", from);
+                break; // Do nothing, don't reserve memory yet
+
+            case sender_message_type::mutation:
+                {
+                    hslogger.trace("[{}] Received mutation message, size={}", from, msg.fm->representation().size());
+
+                    const schema_ptr s = co_await mm.get_schema_for_write(msg.fm->schema_version(), from, ms);
+                    const memtable::id mtbl_id = co_await sp.mutate_streaming_mutation(s, *msg.fm);
+
+                    _applied_up_to = msg.mutation_id;
+
+                    if (!_memtable_to_lowest_id.contains(mtbl_id)) {
+                        _memtable_to_lowest_id[mtbl_id] = _applied_up_to;
+                        _lowest_ids.insert(_applied_up_to);
+                    }
+
+                    hslogger.trace("[{}] Put mutation #{} into memtable with ID={}", from, mtbl_id, msg.mutation_id);
+                }
+                break;
+            
+            case sender_message_type::status_request:
+                hslogger.trace("[{}] Received status_request message", from);
+                co_await send_status_report(from);
+                break;
+            
+            case sender_message_type::flush_request:
+                // TODO: Implement coalescing flushes
+                // TODO: Consider doing this asynchronously
+                hslogger.trace("[{}] Received flush_request message", from);
+                hslogger.info("[{}] Flushing streaming memtables", from);
+                // TODO: We should actually flush on all shards!
+                // Moreover, this is prone to be racy. We need to wait until
+                // all callbacks issued by the flush_all_streaming_memtables
+                // finish (on all shards!) and only then respond.
+                co_await db.flush_all_streaming_memtables();
+                hslogger.info("[{}] Flushing complete", from);
+                {
+                    receiver_message resp {
+                        .type = receiver_message_type::flush_done,
+                    };
+                    co_await _sink(resp);
+                }
+                break;
+
+            default:
+                throw std::runtime_error(format("unknown message type: {}", uint8_t(msg.type)));
+            }
         }
+    } catch (...) {
+        hslogger.warn("[{}] Got an exception in the receive loop: {}", from, std::current_exception());
     }
 
-    if (*stop_flag) {
-        hslogger.info("[{}] Flushing streaming memtables because of shutdown", from);
-        co_await db.flush_all_streaming_memtables();
-        hslogger.info("[{}] Flushing complete", from);
-        co_await parallel_for_each(per_source_state, [this, from, &sink] (auto& p) {
-            return send_status_report(from, p.first, sink);
-        });
+    // TODO: Wait for asynchronous operations here
+
+    if (!is_closed()) {
+        _closed->set_value();
+        _closed.reset();
+    }
+
+    try {
+        co_await _sink.close();
+    } catch (...) {
+        hslogger.warn("[{}] Got an exception when trying to close the sink: {}", from, std::current_exception());
     }
 
     co_return;
+}
+
+future<> receiver_service::endpoint_session::run() {
+    _closed.emplace();
+    return _closed->get_future();
+}
+
+void receiver_service::endpoint_session::close() {
+    if (is_closed()) {
+        return;
+    }
+
+    // Send a close request to the other node
+    receiver_message msg {
+        .type = receiver_message_type::close_request,
+    };
+    // Waited indirectly
+    // TODO: Error handling
+    (void)_sink(msg).forward_to(std::move(*_closed));
+    _closed.reset();
+}
+
+future<> receiver_service::endpoint_session::stop() {
+    close();
+    return _stopped.get_future();
+}
+
+bool receiver_service::endpoint_session::is_closed() const {
+    return _closed.has_value();
+}
+
+void receiver_service::endpoint_session::on_successful_flush(memtable::id id) {
+    if (auto it = _memtable_to_lowest_id.find(id); it != _memtable_to_lowest_id.end()) {
+        auto lowest_hint_id = it->second;
+        _memtable_to_lowest_id.erase(it);
+        _lowest_ids.erase(lowest_hint_id);
+    }
+}
+
+receiver_service::endpoint_session::endpoint_session(rpc::sink<receiver_message> sink)
+        : _closed(promise<>())
+        , _sink(std::move(sink)) {
+}
+
+future<lw_shared_ptr<receiver_service::endpoint_session>> receiver_service::endpoint_session::start(
+    netw::msg_addr from,
+    service::storage_proxy& sp,
+    service::migration_manager& mm,
+    netw::messaging_service& ms,
+    database& db,
+    rpc::source<sender_message> source,
+    rpc::sink<receiver_message> sink
+) {
+    auto sess = make_lw_shared<endpoint_session>(std::move(sink));
+    sess->_stopped = shared_future<>(sess->run_rpc_stream_task(from, sp, mm, ms, db, source));
+    co_return sess;
 }
 
 void receiver_service::register_rpc_verbs(netw::messaging_service& ms, service::migration_manager& mm, service::storage_proxy& sp, database& db) {
@@ -142,45 +209,18 @@ void receiver_service::register_rpc_verbs(netw::messaging_service& ms, service::
             throw std::runtime_error(format("unsupported protocol version: {}", uint32_t(req.version)));
         }
 
-        if (req.htype != hints_type::regular && req.htype != hints_type::mv) {
-            throw std::runtime_error(format("unsupported hints type: {}", uint32_t(req.htype)));
-        }
-
-        const auto from = netw::messaging_service::get_source(cinfo);
-        auto t = std::tuple<gms::inet_address, uint32_t, hints_type>(from.addr, from.cpu_id, req.htype);
-
-        auto& sess = [&] () -> endpoint_session& {
-            if (auto it = _sessions.find(t); it != _sessions.end()) {
-                // We don't allow more than one RPC session for a given endpoint
-                if (it->second.has_active_rpc()) {
-                    throw std::runtime_error("a session is already present for this endpoint");
-                }
-
-                // Wrong cookie, we have to invalidate the old session
-                _sessions.erase(it);
-            }
-
-            return _sessions.try_emplace(t).first->second;
-        }();
-
         auto sink = ms.make_sink_for_hint_stream(source);
 
-        hslogger.info("Connected with {}", from);
+        const auto from = netw::messaging_service::get_source(cinfo);
+        auto t = std::tuple<gms::inet_address, uint32_t>(from.addr, from.cpu_id);
 
-        // Waited on in receiver_service::stop()
-        (void)with_gate(_rpc_stream_gate, [&] () {
-            sess.stop_flag = make_lw_shared<bool>(false);
-            return sess.run_rpc_stream_task(from, sp, mm, ms, db, std::move(source), sink).then_wrapped([&sess, sink, from] (future<> f) mutable -> future<> {
-                if (!f.failed()) {
-                    hslogger.info("Connection with {} was closed", from);
-                } else {
-                    hslogger.warn("Connection with {} was closed due to an error: {}", from, f.get_exception());
-                }
-                return sink.close().handle_exception([from] (auto ep) {
-                    hslogger.warn("Failed to close sink to {}: {}", from, ep);
-                });
-            }).finally([&sess] { sess.stop_flag = nullptr; });
-        });
+        if (_sessions.get_running(t)) {
+            throw std::runtime_error(format("a session for {} is already running", from));
+        }
+
+        co_await _sessions.get_or_start(t, from, sp, mm, ms, db, std::move(source), sink);
+
+        hslogger.info("[{}] Accepted connection", from);
 
         open_response resp {
             .cookie = _cookie,
@@ -189,26 +229,18 @@ void receiver_service::register_rpc_verbs(netw::messaging_service& ms, service::
     });
 }
 
-future<> receiver_service::unregister_rpc_verbs(netw::messaging_service& ms) {
-    return ms.unregister_hint_stream();
+future<> receiver_service::unregister_rpc_verbs() {
+    return _ms.unregister_hint_stream();
 }
 
 void receiver_service::on_successful_flush(memtable::id id) {
     // Waited in receiver_service::stop()
     (void)with_gate(_flush_report_gate, [this, id] {
         // Because of cross-shard hints, we need to check on all shards
-        // TODO: Pre-emptions? This may take long
-        // Or just write an algorithm with better time complexity
         return container().invoke_on_all([id] (receiver_service& rs) {
-            for (auto& [key, sess] : rs._sessions) {
-                for (auto& [key2, state] : sess.per_source_state) {
-                    if (auto it = state.memtable_to_lowest_rp.find(id); it != state.memtable_to_lowest_rp.end()) {
-                        auto lowest_rp = it->second;
-                        state.memtable_to_lowest_rp.erase(it);
-                        state.lowest_rps.erase(lowest_rp);
-                    }
-                }
-            }
+            rs._sessions.for_each_running([id] (const auto& key, lw_shared_ptr<endpoint_session> sess) {
+                sess->on_successful_flush(id);
+            });
         });
     });
 }
@@ -220,8 +252,8 @@ void receiver_service::on_failed_flush(memtable::id id) {
 }
 
 receiver_service::receiver_service(netw::messaging_service& ms)
-        : _ms(ms) {
-    // Nothing for now
+        : _cookie(utils::UUID_gen::get_time_UUID())
+        , _ms(ms) {
 }
 
 receiver_service::~receiver_service() {
@@ -233,35 +265,13 @@ future<> receiver_service::start(database& db, netw::messaging_service& ms, serv
 
     register_rpc_verbs(ms, mm, sp, db);
     _flush_listener_registration = db.streaming_flush_listeners().register_listener(this);
-
-    // TODO
     co_return;
 }
 
 future<> receiver_service::stop() {
-    // TODO:
-    // - Prevent more rpc connections from being made
-    // - On existing connections, prevent more mutations from being put to memtables
-    // - Flush streaming memtables and send status on existing connections for the last time
-
-    // We will probably have to introduce another verb like streaming does
-    // which breaks the stream on the other side... I don't like this pattern
-
-    for (auto& [key, sess] : _sessions) {
-        if (sess.stop_flag) {
-            *sess.stop_flag = true;
-        }
-    }
-
-    co_await when_all_succeed(
-        unregister_rpc_verbs(_ms),
-        _rpc_stream_gate.close()
-    );
-
+    co_await when_all_succeed(_sessions.stop(), unregister_rpc_verbs()).discard_result();
     _flush_listener_registration = nullptr;
     co_await _flush_report_gate.close();
-
-    co_return;
 }
 
 }

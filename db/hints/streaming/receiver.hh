@@ -27,10 +27,11 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/shared_future.hh>
 #include <seastar/rpc/rpc_types.hh>
-#include "db/commitlog/replay_position.hh"
 #include "db/hints/rp_comparator.hh"
 #include "db/hints/streaming/rpc_messages.hh"
+#include "db/hints/streaming/task_map.hh"
 #include "db/flush_listener.hh"
 #include "message/msg_addr.hh"
 #include "memtable.hh"
@@ -65,41 +66,22 @@ private:
     // The session state is preserved in case of a disconnect, so that
     // the progress is not lost on temporary network failure.
     struct endpoint_session {
-    public:
-        // If non-null, there is an active rpc connection operating on this session.
-        // The boolean can be used to tell the session to stop itself.
-        lw_shared_ptr<bool> stop_flag;
-
-        struct source_state {
-            db::replay_position applied_up_to;
-
-            // For each memtable, what is the lowest ID of a mutation included in it?
-            std::unordered_map<memtable::id, db::replay_position> memtable_to_lowest_rp;
-
-            // Contains IDs from `memtable_to_lowest_rp`, sorted
-            std::set<db::replay_position, foreign_first_rp_comparator> lowest_rps;
-
-            db::replay_position get_flushed_up_to() const {
-                if (lowest_rps.empty()) {
-                    return applied_up_to;
-                }
-
-                db::replay_position rp = *lowest_rps.begin();
-                rp.pos--;
-                return rp;
-            }
-
-            source_state(unsigned shard_id) : lowest_rps(foreign_first_rp_comparator{shard_id}) {}
-        };
-
-        std::unordered_map<gms::inet_address, source_state> per_source_state;
-    
     private:
-        future<> send_status_report(netw::msg_addr from, gms::inet_address source, rpc::sink<receiver_message> sink);
+        std::optional<promise<>> _closed;
+        shared_future<> _stopped;
 
-    public:
-        inline bool has_active_rpc() const {
-            return bool(stop_flag);
+        uint64_t _applied_up_to = 0;
+        // For each memtable, what is the lowest ID of a mutation included in it?
+        std::unordered_map<memtable::id, uint64_t> _memtable_to_lowest_id;
+        std::set<uint64_t> _lowest_ids;
+
+        rpc::sink<receiver_message> _sink;
+
+    private:
+        future<> send_status_report(netw::msg_addr from);
+
+        inline uint64_t get_flushed_up_to() const {
+            return _lowest_ids.empty() ? _applied_up_to : (*_lowest_ids.begin() - 1);
         }
 
         future<> run_rpc_stream_task(
@@ -108,9 +90,31 @@ private:
             service::migration_manager& mm,
             netw::messaging_service& ms,
             database& db,
+            rpc::source<sender_message> source
+        );
+
+        void close();
+
+    public:
+        // Must be public so that lw_shared_ptr works
+        endpoint_session(rpc::sink<receiver_message> sink);
+
+        static future<lw_shared_ptr<endpoint_session>> start(
+            netw::msg_addr from,
+            service::storage_proxy& sp,
+            service::migration_manager& mm,
+            netw::messaging_service& ms,
+            database& db,
             rpc::source<sender_message> source,
             rpc::sink<receiver_message> sink
         );
+
+        future<> run();
+        future<> stop();
+
+        void on_successful_flush(memtable::id id);
+
+        bool is_closed() const;
     };
 
 private:
@@ -120,7 +124,7 @@ private:
     // connected to one receiver shard, either one would block another because
     // we don't allow two sessions at the same time from the same source, or
     // they will invalidate each other's sessions (because of different cookies).
-    std::unordered_map<std::tuple<gms::inet_address, uint32_t, hints_type>, endpoint_session, utils::tuple_hash> _sessions;
+    task_map<std::tuple<gms::inet_address, uint32_t>, endpoint_session, utils::tuple_hash> _sessions;
 
     utils::UUID _cookie;
 
@@ -133,7 +137,7 @@ private:
 private:
     void register_rpc_verbs(netw::messaging_service& ms, service::migration_manager& mm,
             service::storage_proxy& sp, database& db);
-    future<> unregister_rpc_verbs(netw::messaging_service& ms);
+    future<> unregister_rpc_verbs();
 
     virtual void on_successful_flush(memtable::id id) override;
     virtual void on_failed_flush(memtable::id id) override;

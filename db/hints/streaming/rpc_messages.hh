@@ -24,7 +24,6 @@
 #include <cstdint>
 #include <optional>
 #include "frozen_mutation.hh"
-#include "db/commitlog/replay_position.hh"
 #include "utils/UUID.hh"
 
 namespace db {
@@ -39,17 +38,8 @@ enum class protocol_version : uint32_t {
     v1 = 1,
 };
 
-enum class hints_type : uint8_t {
-    // Regular hints
-    regular = 0,
-
-    // Materialized view hints
-    mv = 1,
-};
-
 struct open_request {
     protocol_version version = protocol_version::v1;
-    hints_type htype = hints_type::regular;
 };
 
 struct open_response {
@@ -70,38 +60,33 @@ struct sender_message {
     sender_message_type type = sender_message_type::noop;
     uint64_t next_message_memory_reservation = 0;
 
-    // When the original destination for a hint is no longer its replica,
-    // we send it to all current replicas. We need to differentiate
-    // the original destinations because we use replay positions for tracking
-    // progress, and RPs from different hint queues do not mix.
-    gms::inet_address original_destination;
-
-    db::replay_position rp;
-
-    // used for: mutation
+    // Should not be zero if type == mutation
+    uint64_t mutation_id = 0;
     std::optional<frozen_mutation> fm;
-
     std::optional<uint64_t> request_token;
 };
 
 enum class receiver_message_type : uint8_t {
     // Contains stats about how many hints were saved to memtables/sstables
     status = 0,
+
+    // Confirmation that the flush has been done
+    flush_done = 1,
+
+    // Request for the other side to close the stream
+    close_request = 2,
 };
 
 struct receiver_message {
     receiver_message_type type = receiver_message_type::status;
 
-    // Which endpoint this confirmation applies to?
-    gms::inet_address original_destination;
-
     // Up to which RP mutations were applied?
     // If no hints were applied _on this connection_ yet, it will be zero
-    db::replay_position applied_up_to;
+    uint64_t applied_up_to;
 
     // Up to which RP mutations were persisted on disk?
     // If no hints were persisted _on this connection_ yet, it will be zero
-    db::replay_position flushed_up_to;
+    uint64_t flushed_up_to;
 
     std::optional<uint64_t> response_token;
 };

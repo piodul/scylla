@@ -31,7 +31,6 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/rpc/rpc_types.hh>
-#include "db/commitlog/replay_position.hh"
 #include "db/hints/rp_comparator.hh"
 #include "db/hints/streaming/rpc_messages.hh"
 #include "db/flush_listener.hh"
@@ -42,6 +41,7 @@
 #include "database_fwd.hh"
 #include "message/messaging_service_fwd.hh"
 #include "locator/token_metadata.hh"
+#include "db/hints/streaming/task_map.hh"
 
 class frozen_mutation;
 
@@ -51,57 +51,58 @@ namespace streaming {
 
 // TODO: Should we clean very old, inactive sessions?
 // TODO: Metrics
-// TODO: loading_shared_values actually can be useful here
 
 struct replay_status {
-    db::replay_position applied_up_to;
-    db::replay_position flushed_up_to;
+    uint64_t applied_up_to;
+    uint64_t flushed_up_to;
 };
 
 class sender_proxy final {
 public:
     class rpc_session {
     private:
-        rpc::sink<sender_message> _sink;
-        utils::UUID _cookie;
-
-        std::unordered_map<uint64_t, promise<replay_status>> _pending_requests;
+        std::unordered_map<uint64_t, promise<receiver_message>> _pending_requests;
         uint64_t _next_request_id = 1;
 
-        future<> _finished = make_ready_future<>();
+        rpc::sink<sender_message> _sink;
+        rpc::source<receiver_message> _source;
+
+        utils::UUID _cookie;
+
+        std::optional<promise<>> _closed;
+        shared_future<> _stopped;
 
     private:
-        future<> run_receiver(rpc::source<receiver_message> source);
+        future<> do_run();
+        void close();
 
     public:
-        rpc_session(rpc::source<receiver_message> source, rpc::sink<sender_message> sink);
+        // Must be public because make_lw_shared doesn't work otherwise
+        rpc_session(utils::UUID cookie, rpc::sink<sender_message> sink, rpc::source<receiver_message> source);
 
-        static future<lw_shared_ptr<rpc_session>> open(gms::inet_address ep, hints_type htype, netw::messaging_service& ms);
+        static future<lw_shared_ptr<rpc_session>> start(netw::messaging_service& ms, gms::inet_address addr);
+
+        future<> run();
+        future<> stop();
 
         future<> send_message(const sender_message& msg);
-        future<replay_status> query_status(gms::inet_address original_destination);
+        future<receiver_message> send_request(sender_message& request);
+        future<replay_status> query_status();
         future<> request_flush();
-        future<> close();
 
-        inline bool has_finished() const {
-            return _finished.available();
-        }
+        const utils::UUID& get_cookie() const;
 
-        inline const utils::UUID& get_cookie() const {
-            return _cookie;
-        }
+        bool is_closed() const;
     };
 
 private:
     // If the connection broke, it will be marked as nullptr
-    std::unordered_map<gms::inet_address, lw_shared_ptr<rpc_session>> _sessions;
-    std::unordered_map<gms::inet_address, shared_future<lw_shared_ptr<rpc_session>>> _pending_sessions;
+    task_map<gms::inet_address, rpc_session> _sessions;
     netw::messaging_service& _ms;
-
-    hints_type _htype;
+    bool _stopped = false;
 
 public:
-    sender_proxy(hints_type htype, netw::messaging_service& ms);
+    sender_proxy(netw::messaging_service& ms);
     ~sender_proxy();
 
     future<> start();
@@ -110,18 +111,18 @@ public:
     future<lw_shared_ptr<rpc_session>> get_or_create_session(gms::inet_address ep);
 };
 
-// TODO: Register for events 
+// TODO: Register for cluster events, i.e. removed nodes
 class one_owner_sender {
 private:
     struct endpoint_state {
-        db::replay_position sent_up_to;
-        db::replay_position applied_up_to;
-        db::replay_position flushed_up_to;
+        uint64_t sent_up_to;
+        uint64_t applied_up_to;
+        uint64_t flushed_up_to;
 
         utils::UUID cached_cookie;
         lw_shared_ptr<sender_proxy::rpc_session> cached_session;
 
-        endpoint_state(db::replay_position rp) {
+        endpoint_state(uint64_t rp) {
             sent_up_to = rp;
             applied_up_to = rp;
             flushed_up_to = rp;
@@ -134,20 +135,21 @@ private:
     std::unordered_map<gms::inet_address, endpoint_state> _ep_states;
 
     locator::token_metadata_ptr _token_metadata;
+    uint64_t _next_mutation_id = 1;
 
 public:
     one_owner_sender(locator::token_metadata_ptr token_metadata, sender_proxy& proxy, gms::inet_address main_destination);
 
-    future<db::replay_position> refresh_connections();
-    future<> send_mutation(database& db, db::replay_position rp, frozen_mutation_and_schema&& fms);
+    future<uint64_t> refresh_connections();
+    future<uint64_t> send_mutation(database& db, frozen_mutation_and_schema&& fms);
     future<> request_flush();
 
     // Returns the lowest position up to which we are sure that hints were flushed.
-    future<db::replay_position> query_status();
+    future<uint64_t> query_status();
 
     // TODO: Listening for flush events? A structure which accelerates the query for the lowest flushed position?
 
-    db::replay_position get_flush_position() const;
+    uint64_t get_flush_position() const;
 };
 
 }
