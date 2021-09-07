@@ -55,6 +55,12 @@ struct foreign_first_rp_comparator {
         return (shard_a - local_shard_id) > (shard_b - local_shard_id);
     }
 
+    static inline db::replay_position min() {
+        // Larger shard IDs are considered smaller (except for local_shard_id),
+        // so use a large, fake shard ID
+        return db::replay_position((1 << db::replay_position::max_cpu_bits) - 1, 0, 0);
+    }
+
     explicit foreign_first_rp_comparator(unsigned shard_id) : local_shard_id(shard_id) {}
 };
 
@@ -63,6 +69,10 @@ struct foreign_first_segment_id_comparator {
 
     inline bool operator()(const db::segment_id_type& a, const db::segment_id_type& b) const {
         return foreign_first_rp_comparator(local_shard_id)(db::replay_position(a), db::replay_position(b));
+    }
+
+    static inline db::segment_id_type min() {
+        return foreign_first_rp_comparator::min().pos;
     }
 
     explicit foreign_first_segment_id_comparator(unsigned shard_id) : local_shard_id(shard_id) {}

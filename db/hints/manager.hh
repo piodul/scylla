@@ -40,8 +40,10 @@
 #include "db/commitlog/commitlog.hh"
 #include "utils/loading_shared_values.hh"
 #include "db/hints/resource_manager.hh"
+#include "db/hints/queue_store.hh"
 #include "db/hints/host_filter.hh"
 #include "db/hints/sync_point.hh"
+#include "db/hints/streaming/sender.hh"
 
 class fragmented_temporary_buffer;
 
@@ -52,8 +54,6 @@ class directories;
 namespace db {
 namespace hints {
 
-using node_to_hint_store_factory_type = utils::loading_shared_values<gms::inet_address, db::commitlog>;
-using hints_store_ptr = node_to_hint_store_factory_type::entry_ptr;
 using hint_entry_reader = commitlog_entry_reader;
 using timer_clock_type = seastar::lowres_clock;
 
@@ -76,17 +76,19 @@ public:
     future<> ensure_rebalanced();
 };
 
+struct manager_stats {
+    uint64_t size_of_hints_in_progress = 0;
+    uint64_t written = 0;
+    uint64_t errors = 0;
+    uint64_t dropped = 0;
+    uint64_t sent = 0;
+    uint64_t discarded = 0;
+    uint64_t corrupted_files = 0;
+};
+
 class manager {
 private:
-    struct stats {
-        uint64_t size_of_hints_in_progress = 0;
-        uint64_t written = 0;
-        uint64_t errors = 0;
-        uint64_t dropped = 0;
-        uint64_t sent = 0;
-        uint64_t discarded = 0;
-        uint64_t corrupted_files = 0;
-    };
+    using stats = manager_stats;
 
     // map: shard -> segments
     using hints_ep_segments_map = std::unordered_map<unsigned, std::list<fs::path>>;
@@ -119,58 +121,29 @@ public:
                 state::ep_state_left_the_ring,
                 state::draining>>;
 
-            struct send_one_file_ctx {
-                send_one_file_ctx(std::unordered_map<table_schema_version, column_mapping>& last_schema_ver_to_column_mapping)
-                    : schema_ver_to_column_mapping(last_schema_ver_to_column_mapping)
-                {}
-                std::unordered_map<table_schema_version, column_mapping>& schema_ver_to_column_mapping;
-                seastar::gate file_send_gate;
-                std::optional<db::replay_position> first_failed_rp;
-                std::optional<db::replay_position> last_succeeded_rp;
-                std::set<db::replay_position> in_progress_rps;
-                bool segment_replay_failed = false;
-
-                void mark_hint_as_in_progress(db::replay_position rp);
-                void on_hint_send_success(db::replay_position rp) noexcept;
-                void on_hint_send_failure(db::replay_position rp) noexcept;
-
-                // Returns a position below which hints were successfully replayed.
-                db::replay_position get_replayed_bound() const noexcept;
-            };
-
         private:
-            std::list<std::pair<db::segment_id_type, sstring>> _segments_to_replay;
-            replay_position _last_not_complete_rp;
-            replay_position _sent_upper_bound_rp;
-            std::unordered_map<table_schema_version, column_mapping> _last_schema_ver_to_column_mapping;
+            // std::list<std::pair<db::segment_id_type, sstring>> _segments_to_replay;
+            // replay_position _last_not_complete_rp;
+            // replay_position _sent_upper_bound_rp;
+            // std::unordered_map<table_schema_version, column_mapping> _last_schema_ver_to_column_mapping;
             state_set _state;
             future<> _stopped;
             abort_source _stop_as;
-            clock::time_point _next_flush_tp;
+            // clock::time_point _next_flush_tp;
             clock::time_point _next_send_retry_tp;
             key_type _ep_key;
             end_point_hints_manager& _ep_manager;
             manager& _shard_manager;
             resource_manager& _resource_manager;
+            queue_store& _store;
             service::storage_proxy& _proxy;
             database& _db;
             seastar::scheduling_group _hints_cpu_sched_group;
             gms::gossiper& _gossiper;
             seastar::shared_mutex& _file_update_mutex;
 
-            std::multimap<db::replay_position, lw_shared_ptr<std::optional<promise<>>>> _replay_waiters;
-
         public:
             sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, database& local_db, gms::gossiper& local_gossiper) noexcept;
-            ~sender();
-
-            /// \brief A constructor that should be called from the copy/move-constructor of end_point_hints_manager.
-            ///
-            /// Make sure to properly reassign the references - especially to the \param parent and its internals.
-            ///
-            /// \param other the "sender" instance to copy from
-            /// \param parent the parent object for this "sender" instance
-            sender(const sender& other, end_point_hints_manager& parent) noexcept;
 
             /// \brief Start sending hints.
             ///
@@ -184,31 +157,7 @@ public:
             /// \param should_drain if is drain::yes - drain all pending hints
             future<> stop(drain should_drain) noexcept;
 
-            /// \brief Add a new segment ready for sending.
-            void add_segment(db::segment_id_type, sstring seg_name);
-
-            /// \brief Check if there are still unsent segments.
-            /// \return TRUE if there are still unsent segments.
-            bool have_segments() const noexcept { return !_segments_to_replay.empty(); };
-
-            /// \brief Sets the sent_upper_bound_rp marker to indicate that the hints were replayed _up to_ given position.
-            void rewind_sent_replay_position_to(db::replay_position rp);
-
-            /// \brief Waits until hints are replayed up to a given replay position, or given abort source is triggered.
-            future<> wait_until_hints_are_replayed_up_to(abort_source& as, db::replay_position up_to_rp);
-
-            /// \brief Returns if there are still foreign segments to replay;
-            bool has_foreign_segments() const;
-
         private:
-            /// \brief Gets the name of the current segment that should be sent.
-            ///
-            /// If there are no segments to be sent, nullptr will be returned.
-            const sstring* name_of_current_segment() const;
-
-            /// \brief Removes the current segment from the queue.
-            void pop_current_segment();
-
             /// \brief Send hints collected so far.
             ///
             /// Send hints aggregated so far. This function is going to try to deplete
@@ -251,84 +200,33 @@ public:
             /// \param secs_since_file_mod last modification time stamp (in seconds since Epoch) of the current hints file
             /// \param fname name of the hints file this hint was read from
             /// \return future that resolves when next hint may be sent
-            future<> send_one_hint(lw_shared_ptr<send_one_file_ctx> ctx_ptr, fragmented_temporary_buffer buf, db::replay_position rp, gc_clock::duration secs_since_file_mod, const sstring& fname);
-
-            /// \brief Send all hint from a single file and delete it after it has been successfully sent.
-            /// Send all hints from the given file. If we failed to send the current segment we will pick up in the next
-            /// iteration from where we left in this one.
-            ///
-            /// \param fname file to send
-            /// \return TRUE if file has been successfully sent
-            bool send_one_file(const sstring& fname);
+            // future<> send_one_hint(lw_shared_ptr<send_one_file_ctx> ctx_ptr, fragmented_temporary_buffer buf, db::replay_position rp, gc_clock::duration secs_since_file_mod, const sstring& fname);
 
             /// \brief Checks if we can still send hints.
             /// \return TRUE if the destination Node is either ALIVE or has left the ring (e.g. after decommission or removenode).
             bool can_send() noexcept;
 
-            /// \brief Restore a mutation object from the hints file entry.
-            /// \param ctx_ptr pointer to the send context
-            /// \param buf hints file entry
-            /// \return The mutation object representing the original mutation stored in the hints file.
-            frozen_mutation_and_schema get_mutation(lw_shared_ptr<send_one_file_ctx> ctx_ptr, fragmented_temporary_buffer& buf);
-
-            /// \brief Get a reference to the column_mapping object for a given frozen mutation.
-            /// \param ctx_ptr pointer to the send context
-            /// \param fm Frozen mutation object
-            /// \param hr hint entry reader object
-            /// \return
-            const column_mapping& get_column_mapping(lw_shared_ptr<send_one_file_ctx> ctx_ptr, const frozen_mutation& fm, const hint_entry_reader& hr);
-
-            /// \brief Perform a single mutation send atempt.
-            ///
-            /// If the original destination end point is still a replica for the given mutation - send the mutation directly
-            /// to it, otherwise execute the mutation "from scratch" with CL=ALL.
-            ///
-            /// \param m mutation to send
-            /// \param natural_endpoints current replicas for the given mutation
-            /// \return future that resolves when the operation is complete
-            future<> do_send_one_mutation(frozen_mutation_and_schema m, const inet_address_vector_replica_set& natural_endpoints) noexcept;
-
-            /// \brief Send one mutation out.
-            ///
-            /// \param m mutation to send
-            /// \return future that resolves when the mutation sending processing is complete.
-            future<> send_one_mutation(frozen_mutation_and_schema m);
-
-            /// \brief Notifies replay waiters for which the target replay position was reached.
-            void notify_replay_waiters() noexcept;
-
-            /// \brief Dismisses ALL current replay waiters with an exception.
-            void dismiss_replay_waiters() noexcept;
-
-            /// \brief Get the last modification time stamp for a given file.
-            /// \param fname File name
-            /// \return The last modification time stamp for \param fname.
-            static future<timespec> get_last_file_modification(const sstring& fname);
-
-            struct stats& shard_stats() {
+            stats& shard_stats() {
                 return _shard_manager._stats;
             }
-
-            /// \brief Flush all pending hints to storage if hints_flush_period passed since the last flush event.
-            /// \return Ready, never exceptional, future when operation is complete.
-            future<> flush_maybe() noexcept;
 
             const key_type& end_point_key() const noexcept {
                 return _ep_key;
             }
 
             /// \brief Return the amount of time we want to sleep after the current iteration.
-            /// \return The time till the soonest event: flushing or re-sending.
+            /// \return The time till the next re-sending.
             clock::duration next_sleep_duration() const;
         };
 
     private:
         key_type _key;
         manager& _shard_manager;
-        hints_store_ptr _hints_store_anchor;
-        seastar::gate _store_gate;
+        // hints_store_ptr _hints_store_anchor;
+        // seastar::gate _store_gate;
         lw_shared_ptr<seastar::shared_mutex> _file_update_mutex_ptr;
         seastar::shared_mutex& _file_update_mutex;
+        queue_store _store;
 
         enum class state {
             can_hint,               // hinting is currently allowed (used by the space_watchdog)
@@ -342,24 +240,18 @@ public:
             state::stopped>>;
 
         state_set _state;
-        const fs::path _hints_dir;
-        uint64_t _hints_in_progress = 0;
-        db::replay_position _last_written_rp;
+        // const fs::path _hints_dir;
+        // uint64_t _hints_in_progress = 0;
+        // db::replay_position _last_written_rp;
         sender _sender;
 
     public:
         end_point_hints_manager(const key_type& key, manager& shard_manager);
-        end_point_hints_manager(end_point_hints_manager&&);
         ~end_point_hints_manager();
 
         const key_type& end_point_key() const noexcept {
             return _key;
         }
-
-        /// \brief Get the corresponding hints_store object. Create it if needed.
-        /// \note Must be called under the \ref _file_update_mutex.
-        /// \return The corresponding hints_store object.
-        future<hints_store_ptr> get_or_load();
 
         /// \brief Store a single mutation hint.
         /// \param s column family descriptor
@@ -373,7 +265,7 @@ public:
         ///  in the order they should be sent out.
         ///
         /// \return Ready future when end point hints manager is initialized.
-        future<> populate_segments_to_replay();
+        // future<> populate_segments_to_replay();
 
         /// \brief Waits till all writers complete and shuts down the hints store. Drains hints if needed.
         ///
@@ -392,7 +284,7 @@ public:
 
         /// \return Number of in-flight (towards the file) hints.
         uint64_t hints_in_progress() const noexcept {
-            return _hints_in_progress;
+            return _store.stores_in_progress();
         }
 
         bool replay_allowed() const noexcept {
@@ -433,14 +325,16 @@ public:
 
         /// \brief Returns replay position of the most recently written hint.
         ///
-        /// If there weren't any hints written during this endpoint manager's lifetime, a zero replay_position is returned.
+        /// If there were no hints written during the queue's lifetime,
+        /// it will return a fake position which is guaranteed to be before
+        /// any later hint positions.
         db::replay_position last_written_replay_position() const {
-            return _last_written_rp;
+            return _store.last_stored_replay_position();
         }
 
         /// \brief Waits until hints are replayed up to a given replay position, or given abort source is triggered.
         future<> wait_until_hints_are_replayed_up_to(abort_source& as, db::replay_position up_to_rp) {
-            return _sender.wait_until_hints_are_replayed_up_to(as, up_to_rp);
+            return _store.wait_until_hints_are_flushed_up_to(as, up_to_rp.id);
         }
 
         /// \brief Safely runs a given functor under the file_update_mutex of \ref ep_man
@@ -459,7 +353,7 @@ public:
         }
 
         const fs::path& hints_dir() const noexcept {
-            return _hints_dir;
+            return _store.hints_dir();
         }
 
     private:
@@ -482,7 +376,7 @@ public:
         /// \return Ready future when the procedure above completes.
         future<> flush_current_hints() noexcept;
 
-        struct stats& shard_stats() {
+        stats& shard_stats() {
             return _shard_manager._stats;
         }
 
@@ -519,7 +413,7 @@ private:
     const fs::path _hints_dir;
     dev_t _hints_dir_device_id = 0;
 
-    node_to_hint_store_factory_type _store_factory;
+    // node_to_hint_store_factory_type _store_factory;
     host_filter _host_filter;
     shared_ptr<service::storage_proxy> _proxy_anchor;
     shared_ptr<gms::gossiper> _gossiper_anchor;
@@ -728,10 +622,6 @@ private:
     ///
     /// \param hints_directory a root hints directory
     static void remove_irrelevant_shards_directories(const sstring& hints_directory);
-
-    node_to_hint_store_factory_type& store_factory() noexcept {
-        return _store_factory;
-    }
 
     service::storage_proxy& local_storage_proxy() const noexcept {
         return *_proxy_anchor;

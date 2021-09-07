@@ -29,6 +29,8 @@
 #include "db/hints/streaming/sender.hh"
 #include "db/hints/streaming/task_map.hh"
 
+static logging::logger hslogger("hints_streaming_sender");
+
 namespace db {
 namespace hints {
 namespace streaming {
@@ -336,6 +338,8 @@ uint64_t one_owner_sender::get_flush_position() const {
     }
     return min;
 }
+
+thread_local uint64_t one_owner_sender::_next_mutation_id = 1;
 
 }
 }

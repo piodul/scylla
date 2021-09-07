@@ -57,7 +57,7 @@ struct replay_status {
     uint64_t flushed_up_to;
 };
 
-class sender_proxy final {
+class sender_proxy final : public seastar::async_sharded_service<sender_proxy> {
 public:
     class rpc_session {
     private:
@@ -135,7 +135,9 @@ private:
     std::unordered_map<gms::inet_address, endpoint_state> _ep_states;
 
     locator::token_metadata_ptr _token_metadata;
-    uint64_t _next_mutation_id = 1;
+
+    // TODO: Make it a not-thread-local
+    static thread_local uint64_t _next_mutation_id;
 
 public:
     one_owner_sender(locator::token_metadata_ptr token_metadata, sender_proxy& proxy, gms::inet_address main_destination);
