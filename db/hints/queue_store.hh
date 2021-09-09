@@ -115,7 +115,6 @@ private:
 
     future<> _flusher = make_ready_future<>();
     bool _sending_in_progress = false;
-    bool _need_flush = false;
 
     manager_stats& _stats;
 

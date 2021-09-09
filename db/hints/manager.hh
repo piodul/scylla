@@ -202,10 +202,12 @@ public:
             /// \return future that resolves when next hint may be sent
             // future<> send_one_hint(lw_shared_ptr<send_one_file_ctx> ctx_ptr, fragmented_temporary_buffer buf, db::replay_position rp, gc_clock::duration secs_since_file_mod, const sstring& fname);
 
+        public:
             /// \brief Checks if we can still send hints.
             /// \return TRUE if the destination Node is either ALIVE or has left the ring (e.g. after decommission or removenode).
             bool can_send() noexcept;
 
+        private:
             stats& shard_stats() {
                 return _shard_manager._stats;
             }

@@ -78,13 +78,10 @@ future<> queue_store::stop() {
     // Abort all asynchronous processes
     _as.request_abort();
     _new_segments_to_replay.broken();
-    dismiss_replay_waiters();
 
-    // Wait for asynchronous processes to finish
-    co_await when_all_succeed(
-        _ops_gate.close(),
-        std::move(_flusher)
-    ).discard_result();
+    co_await std::move(_flusher);
+    co_await _ops_gate.close();
+    dismiss_replay_waiters();
 
     // TODO: Move destroying the commitlog into a separate function?
     auto old_store = co_await _store.get_future();
@@ -95,6 +92,7 @@ future<> queue_store::stop() {
 
 future<> queue_store::run_flush_loop(lowres_clock::duration period) {
     lowres_clock::time_point next_flush_time = lowres_clock::now() + period;
+    queue_logger.debug("[{}] Starting the flush loop", _ep);
     while (true) {
         try {
             // Sleep at least 10 ticks of the clock
@@ -105,6 +103,7 @@ future<> queue_store::run_flush_loop(lowres_clock::duration period) {
             next_flush_time = lowres_clock::now() + period;
             co_await flush();
         } catch (seastar::sleep_aborted&) {
+            queue_logger.debug("[{}] Stopping the flush loop", _ep);
             break;
         } catch (...) {
             // Log the error and continue
@@ -114,10 +113,10 @@ future<> queue_store::run_flush_loop(lowres_clock::duration period) {
 }
 
 future<> queue_store::flush() {
-    if (!_need_flush) {
-        queue_logger.debug("[{}] Skipping flush because there were no hints written since the last flush", _ep);
-        co_return;
-    }
+    // if (!_need_flush) {
+    //     queue_logger.debug("[{}] Skipping flush because there were no hints written since the last flush", _ep);
+    //     co_return;
+    // }
 
     co_await _file_update_mutex.lock();
     auto unlock = defer([this] { _file_update_mutex.unlock(); });
@@ -139,7 +138,6 @@ future<> queue_store::flush() {
         co_return co_await self->create_store();
     }));
     co_await _store.get_future().discard_result();
-    _need_flush = false;
 }
 
 future<lw_shared_ptr<commitlog>> queue_store::create_store() {
@@ -261,7 +259,6 @@ bool queue_store::store_hint(schema_ptr s, lw_shared_ptr<const frozen_mutation> 
                     tracing::trace(tr_state, "Failed to store a hint to {}: {}", _ep, eptr);
                 });
             }).finally([this, mut_size, fm, s] {
-                _need_flush = true;
                 --_stores_in_progress;
                 _stats.size_of_hints_in_progress -= mut_size;
             });
@@ -393,7 +390,7 @@ future<> queue_store::drain(queue_store::reader& r) {
             queue_logger.debug("[{}] drain(): an error occured in read_mutations(): {}, will delete and skip the file", _ep, std::current_exception());
         }
 
-        co_await delete_segment(_segments_to_confirm.begin()->second);
+        co_await delete_segment(_currently_replayed_segment->seg.path);
         _currently_replayed_segment.reset();
 
         try {
@@ -556,6 +553,7 @@ future<> queue_store::confirm_flushed_up_to(db::segment_id_type segment_id_up_to
         _flushed_up_to_segment_id = _segments_to_confirm.begin()->first;
         _segments_to_confirm.erase(_segments_to_confirm.begin());
         notify_replay_waiters();
+        queue_logger.trace("[{}] confirm_flushed_up_to(): remaining segments to confirm: {}", _ep, _segments_to_confirm.size());
     }
 }
 

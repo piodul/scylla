@@ -543,7 +543,7 @@ public:
 
         // TODO: Should we limit memory in the queue_store? We probably should
         auto op = _barrier.start();
-        auto units = _resource_manager.get_send_units_for(fm_a_s.fm.representation().size());
+        auto units = co_await _resource_manager.get_send_units_for(fm_a_s.fm.representation().size());
 
         // Waited in stop() via the _send_ops gate
         (void)send_async(rp, std::move(fm_a_s)).finally([op = std::move(op), units = std::move(units)] {});
@@ -670,6 +670,10 @@ void manager::end_point_hints_manager::sender::start() {
 
 // Runs in the seastar::async context
 void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
+    if (!replay_allowed() || !can_send()) {
+        return;
+    }
+
     legacy_hint_sender sender{_store, shard_stats(), end_point_key(), _resource_manager, _db, _proxy};
 
     // TODO: Exception handling?
