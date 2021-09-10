@@ -70,8 +70,9 @@ queue_store::~queue_store() {
 
 void queue_store::start(lowres_clock::duration flush_period) {
     _store = shared_future<lw_shared_ptr<commitlog>>(create_store());
-    // TODO: We need this to run in a designated scheduling group (streaming)
-    _flusher = run_flush_loop(flush_period);
+    _flusher = with_scheduling_group(_local_db.get_streaming_scheduling_group(), [this, flush_period] {
+        return run_flush_loop(flush_period);
+    });
 }
 
 future<> queue_store::stop() {

@@ -46,6 +46,7 @@
 #include "utils/runtime.hh"
 #include "db/hints/rp_comparator.hh"
 #include "utils/phased_barrier.hh"
+#include "db/hints/streaming/sender.hh"
 
 using namespace std::literals::chrono_literals;
 
@@ -594,6 +595,70 @@ public:
 
     bool has_failed() const {
         return _failed;
+    }
+};
+
+class streaming_hints_sender final : public queue_store::reader {
+private:
+    streaming::one_owner_sender _oo_sender;
+
+    // TODO: Use circular_buffer?
+    std::list<std::pair<uint64_t, db::segment_id_type>> _hint_id_per_segment;
+    db::segment_id_type _current_segment_id = 0;
+
+    queue_store& _store;
+    manager_stats& _stats;
+    database& _db;
+
+public:
+    streaming_hints_sender(queue_store& store, manager_stats& stats, gms::inet_address target_endpoint, resource_manager& rmgr, database& db, service::storage_proxy& storage_proxy, streaming::sender_proxy& sender_proxy)
+            : _oo_sender(storage_proxy.get_token_metadata_ptr(), sender_proxy)
+            , _store(store)
+            , _stats(stats)
+
+    // TODO: Stop if can_send() is false? Is it really needed?
+
+    // Must be called before read() or drain() is called
+    future<> start() {
+        const auto start_from = co_await _oo_sender.refresh_connections();
+        // Look up the segment to rewind to
+
+        // TODO: Provide the shard id to the sender as a parameter
+        foreign_first_segment_id_comparator cmp{this_shard_id()};
+
+        if (_hint_id_per_segment.empty()) {
+            _store.roll_back_to(db::replay_position(cmp.min()));
+        } else {
+            std::optional<db::segment_id_type> roll_back_to;
+            while (!_hint_id_per_segment.empty() && _hint_id_per_segment.back().first > start_from) {
+                roll_back_to = _hint_id_per_segment.back().second;
+                _hint_id_per_segment.pop_back();
+            }
+            if (roll_back_to.has_value()) {
+                _store.roll_back_to(db::replay_position(*roll_back_to));
+            }
+        }
+
+        co_return;
+    }
+
+    future<stop_iteration> on_file_start(db::segment_id_type segment_id, const sstring& file_name, bool is_resuming) noexcept override {
+        _current_segment_id = segment_id;
+        co_return stop_iteration::no;
+    }
+
+    future<stop_iteration> on_file_end() override {
+        // Create a checkpoint
+        const uint64_t confirmed_up_to = co_await _oo_sender.query_status();
+        _hint_id_per_segment.emplace_back(_current_segment_id, confirmed_up_to);
+
+        co_return stop_iteration::no;
+    }
+
+    future<stop_iteration> on_mutation(db::replay_position rp, frozen_mutation_and_schema fm_a_s) noexcept override {
+        co_await _oo_sender.send_mutation(_db, std::move(fm_a_s));
+        ++_stats.sent;
+        co_return stop_iteration::no;
     }
 };
 
