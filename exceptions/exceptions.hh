@@ -42,7 +42,17 @@ enum class exception_code : int32_t {
     INVALID         = 0x2200,
     CONFIG_ERROR    = 0x2300,
     ALREADY_EXISTS  = 0x2400,
-    UNPREPARED      = 0x2500
+    UNPREPARED      = 0x2500,
+
+    // Scylla-specific error codes
+    // The error codes below are advertised to the drivers during connection
+    // handshake using the protocol extension negotiation, and are only
+    // enabled if the drivers explicitly enable them. Therefore it's perfectly
+    // fine to change them in case some new error codes are introduced
+    // in Cassandra.
+    // NOTE TO DRIVER DEVELOPERS: These constants must not be relied upon,
+    // they must be learned from protocol extensions instead.
+    RATE_LIMIT_ERROR = 0xF000
 };
 
 const std::unordered_map<exception_code, sstring>& exception_map();
@@ -181,6 +191,10 @@ struct overloaded_exception : public cassandra_exception {
     explicit overloaded_exception(size_t c) noexcept;
     explicit overloaded_exception(sstring msg) noexcept :
         cassandra_exception(exception_code::OVERLOADED, std::move(msg)) {}
+};
+
+struct rate_limit_exception : public cassandra_exception {
+    rate_limit_exception(const sstring& ks, const sstring& cf) noexcept;
 };
 
 class request_validation_exception : public cassandra_exception {

@@ -483,6 +483,9 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         }), utils::result_catch<exceptions::function_execution_exception>([&] (const auto& ex) {
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_function_failure_error(stream, ex.code(), ex.what(), ex.ks_name, ex.func_name, ex.args, trace_state);
+        }), utils::result_catch<exceptions::rate_limit_exception>([&] (const auto& ex) {
+            try { ++_server._stats.errors[ex.code()]; } catch(...) {}
+            return make_rate_limit_error(stream, ex.code(), ex.what(), trace_state, client_state);
         }), utils::result_catch<exceptions::cassandra_exception>([&] (const auto& ex) {
             // Note: the CQL protocol specifies that many types of errors have
             // mandatory parameters. These cassandra_exception subclasses MUST
@@ -1273,6 +1276,15 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_function_fail
     response->write_string(func_name);
     response->write_string_list(args);
     return response;
+}
+
+std::unique_ptr<cql_server::response> cql_server::connection::make_rate_limit_error(int16_t stream, exceptions::exception_code err, sstring msg, const tracing::trace_state_ptr& tr_state, const service::client_state& client_state) const
+{
+    if (!client_state.is_protocol_extension_set(cql_protocol_extension::RATE_LIMIT_ERROR)) {
+        return make_error(stream, exceptions::exception_code::CONFIG_ERROR, std::move(msg), tr_state);
+    }
+
+    return make_error(stream, err, std::move(msg), tr_state);
 }
 
 std::unique_ptr<cql_server::response> cql_server::connection::make_error(int16_t stream, exceptions::exception_code err, sstring msg, const tracing::trace_state_ptr& tr_state) const
