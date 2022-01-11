@@ -9,6 +9,7 @@
 
 #include "result_message.hh"
 #include <seastar/core/print.hh>
+#include <typeinfo>
 
 namespace cql_transport::messages {
 
@@ -19,6 +20,14 @@ std::ostream& operator<<(std::ostream& os, const result_message::void_message& m
 
 std::ostream& operator<<(std::ostream& os, const result_message::bounce_to_shard& msg) {
     fmt::print(os, "{{result_message::bounce_to_shard {}}}", msg.move_to_shard());
+    return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const result_message::exception& msg) {
+    auto [name, what] = msg.get_exception().accept([] (const auto& ex) -> std::pair<const char*, const char*> {
+        return { typeid(ex).name(), ex.what() };
+    });
+    fmt::print(os, "{{result_message::exception {} ({})}}", what);
     return os;
 }
 
@@ -78,10 +87,15 @@ std::ostream& operator<<(std::ostream& os, const result_message& msg) {
         void visit(const result_message::schema_change& m) override { _os << m; };
         void visit(const result_message::rows& m) override { _os << m; };
         void visit(const result_message::bounce_to_shard& m) override { _os << m; };
+        void visit(const result_message::exception& m) override { _os << m; };
     };
     visitor print_visitor{os};
     msg.accept(print_visitor);
     return os;
+}
+
+void result_message::visitor_base::visit(const result_message::exception& ex) {
+    ex.throw_me();
 }
 
 }

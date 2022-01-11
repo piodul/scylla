@@ -16,6 +16,7 @@
 
 #include "transport/messages/result_message_base.hh"
 #include "transport/event.hh"
+#include "exceptions/exceptions.hh"
 
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
@@ -68,6 +69,7 @@ public:
     virtual void visit(const result_message::schema_change&) = 0;
     virtual void visit(const result_message::rows&) = 0;
     virtual void visit(const result_message::bounce_to_shard&) = 0;
+    virtual void visit(const result_message::exception&) = 0;
 };
 
 class result_message::visitor_base : public visitor {
@@ -79,6 +81,7 @@ public:
     void visit(const result_message::schema_change&) override {};
     void visit(const result_message::rows&) override {};
     void visit(const result_message::bounce_to_shard&) override { assert(false); };
+    void visit(const result_message::exception&) override;
 };
 
 class result_message::void_message : public result_message {
@@ -113,6 +116,34 @@ public:
 };
 
 std::ostream& operator<<(std::ostream& os, const result_message::bounce_to_shard& msg);
+
+// This result is handled internally. It can be used to indicate an exception
+// which needs to be handled without involving the C++ exception machinery,
+// e.g. when a rate limit is reached.
+class result_message::exception : public result_message {
+private:
+    exceptions::coordinator_exception_container _ex;
+public:
+    exception(exceptions::coordinator_exception_container ex) : _ex(std::move(ex)) {}
+    virtual void accept(result_message::visitor& v) const override {
+        v.visit(*this);
+    }
+    [[noreturn]] void throw_me() const {
+        _ex.throw_me();
+    }
+    const exceptions::coordinator_exception_container& get_exception() const & {
+        return _ex;
+    }
+    exceptions::coordinator_exception_container&& get_exception() && {
+        return std::move(_ex);
+    }
+
+    virtual bool is_exception() const override {
+        return true;
+    }
+};
+
+std::ostream& operator<<(std::ostream& os, const result_message::exception& msg);
 
 class result_message::set_keyspace : public result_message {
 private:

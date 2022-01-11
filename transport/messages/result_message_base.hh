@@ -38,6 +38,10 @@ public:
     virtual std::optional<unsigned> move_to_shard() const {
         return std::nullopt;
     }
+
+    virtual bool is_exception() const {
+        return false;
+    }
     //
     // Message types:
     //
@@ -47,6 +51,7 @@ public:
     class schema_change;
     class rows;
     class bounce_to_shard;
+    class exception;
 };
 
 std::ostream& operator<<(std::ostream& os, const result_message& msg);
