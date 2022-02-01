@@ -15,6 +15,7 @@
 #include "timestamp.hh"
 #include "log.hh"
 #include "service_permit.hh"
+#include "exceptions/exceptions.hh"
 
 namespace cql_transport::messages {
     class result_message;
@@ -128,7 +129,7 @@ private:
             service::query_state& query_state, const query_options& options,
             bool local, api::timestamp_type now) const;
 
-    future<> execute_without_conditions(
+    future<exceptions::coordinator_result<>> execute_without_conditions(
             query_processor& qp,
             std::vector<mutation> mutations,
             db::consistency_level cl,

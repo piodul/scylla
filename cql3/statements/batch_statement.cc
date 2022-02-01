@@ -24,6 +24,9 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/range/adaptor/uniqued.hpp>
 
+template<typename T = void>
+using coordinator_result = exceptions::coordinator_result<T>;
+
 namespace cql3 {
 
 namespace statements {
@@ -272,13 +275,17 @@ future<shared_ptr<cql_transport::messages::result_message>> batch_statement::do_
     return get_mutations(qp, options, timeout, local, now, query_state).then([this, &qp, &options, timeout, tr_state = query_state.get_trace_state(),
                                                                                                                                permit = query_state.get_permit()] (std::vector<mutation> ms) mutable {
         return execute_without_conditions(qp, std::move(ms), options.get_consistency(), timeout, std::move(tr_state), std::move(permit));
-    }).then([] {
+    }).then([] (coordinator_result<> res) {
+        if (!res) {
+            return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(
+                    seastar::make_shared<cql_transport::messages::result_message::exception>(std::move(res).assume_error()));
+        }
         return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(
                 make_shared<cql_transport::messages::result_message::void_message>());
     });
 }
 
-future<> batch_statement::execute_without_conditions(
+future<coordinator_result<>> batch_statement::execute_without_conditions(
         query_processor& qp,
         std::vector<mutation> mutations,
         db::consistency_level cl,
@@ -311,8 +318,7 @@ future<> batch_statement::execute_without_conditions(
             mutate_atomic = false;
         }
     }
-    return qp.proxy().mutate_with_triggers(std::move(mutations), cl, timeout, mutate_atomic, std::move(tr_state), std::move(permit))
-            .then(utils::result_into_future<exceptions::coordinator_result<>>);
+    return qp.proxy().mutate_with_triggers(std::move(mutations), cl, timeout, mutate_atomic, std::move(tr_state), std::move(permit));
 }
 
 future<shared_ptr<cql_transport::messages::result_message>> batch_statement::execute_with_conditions(
