@@ -21,6 +21,7 @@
 #include "cql3/relation.hh"
 #include "cql3/restrictions/statement_restrictions.hh"
 #include "cql3/statements/statement_type.hh"
+#include "exceptions/exceptions.hh"
 
 #include <seastar/core/shared_ptr.hh>
 
@@ -237,7 +238,7 @@ public:
     execute(query_processor& qp, service::query_state& qs, const query_options& options) const override;
 
 private:
-    future<>
+    future<exceptions::coordinator_result<>>
     execute_without_condition(query_processor& qp, service::query_state& qs, const query_options& options) const;
 
     future<::shared_ptr<cql_transport::messages::result_message>>
