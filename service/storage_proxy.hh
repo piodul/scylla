@@ -43,6 +43,7 @@
 #include "utils/small_vector.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include <seastar/core/circular_buffer.hh>
+#include "exceptions/exceptions.hh"
 
 class reconcilable_result;
 class frozen_mutation_and_schema;
@@ -142,6 +143,8 @@ public:
         TIMEOUT,
         FAILURE,
     };
+    template<typename T = void>
+    using result = exceptions::coordinator_result<T>;
     using clock_type = lowres_clock;
     struct config {
         db::hints::host_filter hinted_handoff_enabled = {};

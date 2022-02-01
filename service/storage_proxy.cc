@@ -53,6 +53,7 @@
 #include <boost/range/algorithm/transform.hpp>
 #include <boost/range/algorithm/partition.hpp>
 #include <boost/intrusive/list.hpp>
+#include <boost/outcome/result.hpp>
 #include "utils/latency.hh"
 #include "schema.hh"
 #include "schema_registry.hh"
@@ -88,8 +89,13 @@
 #include "idl/frozen_schema.dist.hh"
 #include "idl/frozen_schema.dist.impl.hh"
 #include "idl/storage_proxy.dist.hh"
+#include "utils/result.hh"
 
 namespace bi = boost::intrusive;
+namespace bo = BOOST_OUTCOME_V2_NAMESPACE;
+
+template<typename T = void>
+using result = service::storage_proxy::result<T>;
 
 namespace service {
 
