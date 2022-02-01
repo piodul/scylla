@@ -90,6 +90,7 @@
 #include "idl/frozen_schema.dist.impl.hh"
 #include "idl/storage_proxy.dist.hh"
 #include "utils/result.hh"
+#include "utils/overloaded_functor.hh"
 
 namespace bi = boost::intrusive;
 namespace bo = BOOST_OUTCOME_V2_NAMESPACE;
@@ -2155,36 +2156,45 @@ future<result<>> storage_proxy::mutate_begin(unique_response_handler_vector ids,
 
 // this function should be called with a future that holds result of mutation attempt (usually
 // future returned by mutate_begin()). The future should be ready when function is called.
-future<> storage_proxy::mutate_end(future<result<>> mutate_result, utils::latency_counter lc, write_stats& stats, tracing::trace_state_ptr trace_state) {
+future<result<>> storage_proxy::mutate_end(future<result<>> mutate_result, utils::latency_counter lc, write_stats& stats, tracing::trace_state_ptr trace_state) {
     assert(mutate_result.available());
     stats.write.mark(lc.stop().latency());
     if (lc.is_start()) {
         stats.estimated_write.add(lc.latency());
     }
+    auto exception_handler = overloaded_functor {
+        [&] (const mutation_write_timeout_exception& ex) {
+            // timeout
+            tracing::trace(trace_state, "Mutation failed: write timeout; received {:d} of {:d} required replies", ex.received, ex.block_for);
+            slogger.debug("Write timeout; received {} of {} required replies", ex.received, ex.block_for);
+            stats.write_timeouts.mark();
+        }
+    };
     try {
-        mutate_result.get().value(); // .value() throws the error, if there is any
+        auto res = mutate_result.get();
+        if (res.has_error()) {
+            res.assume_error().accept(exception_handler);
+            return make_ready_future<result<>>(std::move(res));
+        }
         tracing::trace(trace_state, "Mutation successfully completed");
-        return make_ready_future<>();
+        return make_ready_future<result<>>(bo::success());
     } catch (replica::no_such_keyspace& ex) {
         tracing::trace(trace_state, "Mutation failed: write to non existing keyspace: {}", ex.what());
         slogger.trace("Write to non existing keyspace: {}", ex.what());
-        return make_exception_future<>(std::current_exception());
+        return make_exception_future<result<>>(std::current_exception());
     } catch(mutation_write_timeout_exception& ex) {
-        // timeout
-        tracing::trace(trace_state, "Mutation failed: write timeout; received {:d} of {:d} required replies", ex.received, ex.block_for);
-        slogger.debug("Write timeout; received {} of {} required replies", ex.received, ex.block_for);
-        stats.write_timeouts.mark();
-        return make_exception_future<>(std::current_exception());
+        exception_handler(ex);
+        return make_exception_future<result<>>(std::current_exception());
     } catch (exceptions::unavailable_exception& ex) {
         tracing::trace(trace_state, "Mutation failed: unavailable");
         stats.write_unavailables.mark();
         slogger.trace("Unavailable");
-        return make_exception_future<>(std::current_exception());
+        return make_exception_future<result<>>(std::current_exception());
     }  catch(overloaded_exception& ex) {
         tracing::trace(trace_state, "Mutation failed: overloaded");
         stats.write_unavailables.mark();
         slogger.trace("Overloaded");
-        return make_exception_future<>(std::current_exception());
+        return make_exception_future<result<>>(std::current_exception());
     } catch (...) {
         tracing::trace(trace_state, "Mutation failed: unknown reason");
         throw;
@@ -2407,7 +2417,7 @@ storage_proxy::mutate_internal(Range mutations, db::consistency_level cl, bool c
         register_cdc_operation_result_tracker(ids, tracker);
         return mutate_begin(std::move(ids), cl, tr_state, timeout_opt).then(utils::result_into_future<result<>>);
     }).then_wrapped([this, p = shared_from_this(), lc, tr_state] (future<> f) mutable {
-        return p->mutate_end(then_ok_result(std::move(f)), lc, get_stats(), std::move(tr_state));
+        return p->mutate_end(then_ok_result(std::move(f)), lc, get_stats(), std::move(tr_state)).then(utils::result_into_future<result<>>);
     });
 }
 
@@ -2531,7 +2541,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
       }
     };
     auto cleanup = [p = shared_from_this(), lc, tr_state] (future<> f) mutable {
-        return p->mutate_end(then_ok_result(std::move(f)), lc, p->get_stats(), std::move(tr_state));
+        return p->mutate_end(then_ok_result(std::move(f)), lc, p->get_stats(), std::move(tr_state)).then(utils::result_into_future<result<>>);
     };
 
     if (_cdc && _cdc->needs_cdc_augmentation(mutations)) {
@@ -2624,7 +2634,7 @@ future<> storage_proxy::send_to_endpoint(
     }).then([this, cl, tr_state = std::move(tr_state), timeout = std::move(timeout)] (unique_response_handler_vector ids) mutable {
         return mutate_begin(std::move(ids), cl, std::move(tr_state), std::move(timeout)).then(utils::result_into_future<result<>>);
     }).then_wrapped([p = shared_from_this(), lc, &stats] (future<>&& f) {
-        return p->mutate_end(then_ok_result(std::move(f)), lc, stats, nullptr);
+        return p->mutate_end(then_ok_result(std::move(f)), lc, stats, nullptr).then(utils::result_into_future<result<>>);
     });
 }
 
