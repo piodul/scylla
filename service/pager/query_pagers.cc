@@ -20,6 +20,9 @@
 #include "service/storage_proxy.hh"
 #include "to_string.hh"
 
+template<typename T = void>
+using result = service::pager::query_pager::result<T>;
+
 static logging::logger qlogger("paging");
 
 namespace service::pager {

@@ -17,6 +17,8 @@
 #include "cql3/result_set.hh"
 #include "cql3/selection/selection.hh"
 #include "service/query_state.hh"
+#include "utils/result.hh"
+#include "exceptions/exceptions.hh"
 
 namespace service {
 
@@ -46,6 +48,9 @@ namespace pager {
  */
 class query_pager {
 public:
+    template<typename T = void>
+    using result = exceptions::coordinator_result<T>;
+
     struct stats {
         // Total number of rows read by this pager, based on all pages it fetched
         size_t rows_read_total = 0;
