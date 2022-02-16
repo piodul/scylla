@@ -93,13 +93,16 @@ public:
      * @return the page of result.
      */
     future<std::unique_ptr<cql3::result_set>> fetch_page(uint32_t page_size, gc_clock::time_point, db::timeout_clock::time_point timeout);
+    future<result<std::unique_ptr<cql3::result_set>>> fetch_page_result(uint32_t page_size, gc_clock::time_point, db::timeout_clock::time_point timeout);
 
     /**
      * For more than one page.
      */
-    virtual future<> fetch_page(cql3::selection::result_set_builder&, uint32_t page_size, gc_clock::time_point, db::timeout_clock::time_point timeout);
+    future<> fetch_page(cql3::selection::result_set_builder&, uint32_t page_size, gc_clock::time_point, db::timeout_clock::time_point timeout);
+    virtual future<result<>> fetch_page_result(cql3::selection::result_set_builder&, uint32_t page_size, gc_clock::time_point, db::timeout_clock::time_point timeout);
 
     future<cql3::result_generator> fetch_page_generator(uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout, cql3::cql_stats& stats);
+    future<result<cql3::result_generator>> fetch_page_generator_result(uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout, cql3::cql_stats& stats);
 
     /**
      * Whether or not this pager is exhausted, i.e. whether or not a call to
@@ -138,7 +141,7 @@ protected:
     template<typename Base>
     class query_result_visitor;
     
-    future<service::storage_proxy_coordinator_query_result>
+    future<result<service::storage_proxy_coordinator_query_result>>
     do_fetch_page(uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout);
 
     template<typename Visitor>
