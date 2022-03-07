@@ -1271,6 +1271,8 @@ deps['test/boost/linearizing_input_stream_test'] = [
     "test/lib/log.cc",
 ]
 deps['test/boost/expr_test'] = ['test/boost/expr_test.cc'] + scylla_core
+deps['test/boost/exception_container_test'] = ['test/boost/exception_container_test.cc']
+deps['test/boost/result_utils_test'] = ['test/boost/result_utils_test.cc']
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
