@@ -665,6 +665,7 @@ scylla_core = (['replica/database.cc',
                 'replica/table.cc',
                 'replica/distributed_loader.cc',
                 'replica/memtable.cc',
+                'replica/exceptions.cc',
                 'absl-flat_hash_map.cc',
                 'atomic_cell.cc',
                 'caching_options.cc',
@@ -1125,6 +1126,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/storage_proxy.idl.hh',
         'idl/group0_state_machine.idl.hh',
         'idl/forward_request.idl.hh',
+        'idl/replica_exception.idl.hh',
         ]
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
