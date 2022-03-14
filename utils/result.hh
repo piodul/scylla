@@ -35,8 +35,11 @@ struct exception_container_throw_policy : bo::policy::base {
     }
 };
 
+template<typename T, ExceptionContainer ExCont>
+using result = bo::result<T, ExCont, exception_container_throw_policy>;
+
 template<typename T, typename... Exs>
-using result_with_exception = bo::result<T, exception_container<Exs...>, exception_container_throw_policy>;
+using result_with_exception = result<T, exception_container<Exs...>>;
 
 template<typename R>
 concept ExceptionContainerResult = bo::is_basic_result<R>::value && ExceptionContainer<typename R::error_type>;
@@ -54,6 +57,6 @@ concept ResultRebindableTo =
 // Creates a result type which has the same error type as R, but has a different value type.
 // The name was inspired by std::allocator::rebind.
 template<typename T, ExceptionContainerResult R>
-using rebind_result = bo::result<T, typename R::error_type, exception_container_throw_policy>;
+using rebind_result = result<T, typename R::error_type>;
 
 }

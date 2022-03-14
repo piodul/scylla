@@ -35,9 +35,6 @@ using coordinator_exception_container = utils::exception_container<
 >;
 
 template<typename T = void>
-using coordinator_result = bo::result<T,
-    coordinator_exception_container,
-    utils::exception_container_throw_policy
->;
+using coordinator_result = utils::result<T, coordinator_exception_container>;
 
 }
