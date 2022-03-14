@@ -53,7 +53,6 @@
 #include <boost/range/algorithm/transform.hpp>
 #include <boost/range/algorithm/partition.hpp>
 #include <boost/intrusive/list.hpp>
-#include <boost/outcome/result.hpp>
 #include "utils/latency.hh"
 #include "schema.hh"
 #include "schema_registry.hh"

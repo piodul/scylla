@@ -12,7 +12,8 @@
 // in conjunction with our exception_container.
 
 #include <boost/outcome/policy/base.hpp>
-#include <boost/outcome/result.hpp>
+#include <boost/outcome/bad_access.hpp>
+#include <boost/outcome/basic_result.hpp>
 #include "utils/exception_container.hh"
 
 namespace bo = BOOST_OUTCOME_V2_NAMESPACE;
@@ -36,7 +37,7 @@ struct exception_container_throw_policy : bo::policy::base {
 };
 
 template<typename T, ExceptionContainer ExCont>
-using result = bo::result<T, ExCont, exception_container_throw_policy>;
+using result = bo::basic_result<T, ExCont, exception_container_throw_policy>;
 
 template<typename T, typename... Exs>
 using result_with_exception = result<T, exception_container<Exs...>>;
