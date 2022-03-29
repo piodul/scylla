@@ -94,6 +94,7 @@ private:
     gms::feature _tombstone_gc_options;
     gms::feature _parallelized_aggregation;
     gms::feature _keyspace_storage_options;
+    gms::feature _typed_errors_in_read_rpc;
 
 public:
 
@@ -210,6 +211,10 @@ public:
 
     bool cluster_supports_keyspace_storage_options() const {
         return bool(_keyspace_storage_options);
+    }
+
+    bool cluster_supports_typed_errors_in_read_rpc() const {
+        return bool(_typed_errors_in_read_rpc);
     }
 
     static std::set<sstring> to_feature_set(sstring features_string);
