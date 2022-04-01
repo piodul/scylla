@@ -59,6 +59,7 @@
 #include "tombstone_gc.hh"
 
 #include "replica/data_dictionary_impl.hh"
+#include "replica/exceptions.hh"
 #include "readers/multi_range.hh"
 #include "readers/multishard.hh"
 
@@ -1283,13 +1284,24 @@ database::existing_index_names(const sstring& ks_name, const sstring& cf_to_excl
 
 future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_options opts, const dht::partition_range_vector& ranges,
-                tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout) {
+                tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout, db::allow_per_partition_rate_limit allow_limit) {
     const auto reversed = cmd.slice.is_reversed();
     if (reversed) {
         s = s->make_reversed();
     }
 
     column_family& cf = find_column_family(cmd.cf_id);
+
+    if (allow_limit && ranges.front().is_singular()) {
+        if (auto table_limit = s->per_partition_rate_limit_options().get_max_reads_per_second()) {
+            auto& read_label = cf.get_rate_limiter_label_for_reads();
+            auto token = dht::token::to_int64(ranges.front().start()->value().token());
+            if (_rate_limiter.account_operation(read_label, token, *table_limit) == db::rate_limiter::can_proceed::no) {
+                co_return coroutine::make_exception(replica::rate_limit_exception());
+            }
+        }
+    }
+
     auto& semaphore = get_reader_concurrency_semaphore();
     auto max_result_size = cmd.max_result_size ? *cmd.max_result_size : get_unlimited_query_max_result_size();
 
@@ -1758,7 +1770,7 @@ future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db
     }
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync, db::allow_per_partition_rate_limit allow_limit) {
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
@@ -1766,6 +1778,16 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     auto& cf = find_column_family(uuid);
     if (!s->is_synced()) {
         throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
+    }
+
+    if (allow_limit) {
+        if (auto table_limit = s->per_partition_rate_limit_options().get_max_writes_per_second()) {
+            auto& write_label = cf.get_rate_limiter_label_for_writes();
+            auto token = dht::token::to_int64(dht::get_token(*s, m.key()));
+            if (_rate_limiter.account_operation(write_label, token, *table_limit) == db::rate_limiter::can_proceed::no) {
+                co_await coroutine::return_exception(replica::rate_limit_exception());
+            }
+        }
     }
 
     sync = sync || db::commitlog::force_sync(s->wait_for_sync_to_commitlog());
@@ -1824,7 +1846,7 @@ void database::update_write_metrics_for_timed_out_write() {
     ++_stats->total_writes_timedout;
 }
 
-future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout) {
+future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout, db::allow_per_partition_rate_limit allow_limit) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
@@ -1832,7 +1854,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
         update_write_metrics_for_timed_out_write();
         return make_exception_future<>(timed_out_error{});
     }
-    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync));
+    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync, allow_limit));
 }
 
 future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout) {
@@ -1840,7 +1862,7 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
         dblog.trace("apply hint {}", m.pretty_printer(s));
     }
     return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, tr_state = std::move(tr_state), timeout] () mutable {
-        return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no));
+        return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no, db::allow_per_partition_rate_limit::no));
     });
 }
 
