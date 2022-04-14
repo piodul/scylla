@@ -22,12 +22,16 @@ class virtual_table_update_exception {
     seastar::sstring get_cause() [[ref]];
 };
 
+class rate_limit_exception {
+};
+
 struct exception_variant {
     std::variant<std::monostate,
             replica::unknown_exception,
             replica::timeout_exception,
             replica::forward_exception,
-            replica::virtual_table_update_exception
+            replica::virtual_table_update_exception,
+            replica::rate_limit_exception
     > reason;
 };
 

@@ -76,12 +76,22 @@ public:
     seastar::sstring grab_cause() noexcept { return std::move(_msg); }
 };
 
+class rate_limit_exception final : public replica_exception {
+public:
+    rate_limit_exception() noexcept
+            : replica_exception()
+    { }
+
+    virtual const char* what() const noexcept override { return "rate limit exceeded"; }
+};
+
 struct exception_variant {
     std::variant<std::monostate,
             unknown_exception,
             timeout_exception,
             forward_exception,
-            virtual_table_update_exception
+            virtual_table_update_exception,
+            rate_limit_exception
     > reason;
 
     exception_variant()
