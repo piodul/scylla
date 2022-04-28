@@ -2808,6 +2808,9 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
             replica::exception_variant ex;
             try {
                 std::rethrow_exception(eptr);
+            } catch (replica::rate_limit_exception& e) {
+                // There might be a lot of those, so ignore
+                ex = replica::encode_replica_exception(e);
             } catch(rpc::closed_error& e) {
                 // ignore, disconnect will be logged by gossiper
                 ex = replica::encode_replica_exception(e);
@@ -2894,6 +2897,8 @@ public:
         bool disconnect = false;
         try {
             std::rethrow_exception(eptr);
+        } catch (replica::rate_limit_exception&) {
+            // There might be a lot of those, so ignore
         } catch (rpc::closed_error&) {
             // do not report connection closed exception, gossiper does that
             disconnect = true;
