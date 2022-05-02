@@ -30,6 +30,7 @@
 #include "service/paxos/proposal.hh"
 #include "replica/exceptions.hh"
 #include "serializer.hh"
+#include "db/allow_per_partition_rate_limit.hh"
 #include "idl/consistency_level.dist.hh"
 #include "idl/tracing.dist.hh"
 #include "idl/result.dist.hh"
