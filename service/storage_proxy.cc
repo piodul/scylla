@@ -2593,7 +2593,8 @@ future<> storage_proxy::send_to_endpoint(
         db::write_type type,
         tracing::trace_state_ptr tr_state,
         write_stats& stats,
-        allow_hints allow_hints) {
+        allow_hints allow_hints,
+        db::allow_per_partition_rate_limit allow_limit) {
     utils::latency_counter lc;
     lc.start();
 
@@ -2605,7 +2606,7 @@ future<> storage_proxy::send_to_endpoint(
         timeout = clock_type::now() + 5min;
     }
     return mutate_prepare(std::array{std::move(m)}, cl, type, /* does view building should hold a real permit */ empty_service_permit(),
-            [this, tr_state, target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats] (
+            [this, tr_state, target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats, allow_limit] (
                 std::unique_ptr<mutation_holder>& m,
                 db::consistency_level cl,
                 db::write_type type, service_permit permit) mutable {
@@ -2631,7 +2632,7 @@ future<> storage_proxy::send_to_endpoint(
             tr_state,
             stats,
             std::move(permit),
-            /* TODO */ db::allow_per_partition_rate_limit::no);
+            allow_limit);
     }).then([this, cl, tr_state = std::move(tr_state), timeout = std::move(timeout)] (unique_response_handler_vector ids) mutable {
         return mutate_begin(std::move(ids), cl, std::move(tr_state), std::move(timeout));
     }).then_wrapped([p = shared_from_this(), lc, &stats] (future<result<>> f) {
@@ -2645,7 +2646,8 @@ future<> storage_proxy::send_to_endpoint(
         inet_address_vector_topology_change pending_endpoints,
         db::write_type type,
         tracing::trace_state_ptr tr_state,
-        allow_hints allow_hints) {
+        allow_hints allow_hints,
+        db::allow_per_partition_rate_limit allow_limit) {
     return send_to_endpoint(
             std::make_unique<shared_mutation>(std::move(fm_a_s)),
             std::move(target),
@@ -2653,7 +2655,8 @@ future<> storage_proxy::send_to_endpoint(
             type,
             std::move(tr_state),
             get_stats(),
-            allow_hints);
+            allow_hints,
+            allow_limit);
 }
 
 future<> storage_proxy::send_to_endpoint(
@@ -2663,7 +2666,8 @@ future<> storage_proxy::send_to_endpoint(
         db::write_type type,
         tracing::trace_state_ptr tr_state,
         write_stats& stats,
-        allow_hints allow_hints) {
+        allow_hints allow_hints,
+        db::allow_per_partition_rate_limit allow_limit) {
     return send_to_endpoint(
             std::make_unique<shared_mutation>(std::move(fm_a_s)),
             std::move(target),
@@ -2671,7 +2675,8 @@ future<> storage_proxy::send_to_endpoint(
             type,
             std::move(tr_state),
             stats,
-            allow_hints);
+            allow_hints,
+            allow_limit);
 }
 
 future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target) {

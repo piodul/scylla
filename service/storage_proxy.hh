@@ -411,7 +411,8 @@ private:
             db::write_type type,
             tracing::trace_state_ptr tr_state,
             write_stats& stats,
-            allow_hints allow_hints = allow_hints::yes);
+            allow_hints allow_hints = allow_hints::yes,
+            db::allow_per_partition_rate_limit allow_limit = db::allow_per_partition_rate_limit::no);
 
     db::view::update_backlog get_view_update_backlog() const;
 
@@ -577,9 +578,9 @@ public:
     // hinted handoff support, and just one target. See also
     // send_to_live_endpoints() - another take on the same original function.
     future<> send_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target, inet_address_vector_topology_change pending_endpoints, db::write_type type,
-            tracing::trace_state_ptr tr_state, write_stats& stats, allow_hints allow_hints = allow_hints::yes);
+            tracing::trace_state_ptr tr_state, write_stats& stats, allow_hints allow_hints = allow_hints::yes, db::allow_per_partition_rate_limit allow_limit = db::allow_per_partition_rate_limit::no);
     future<> send_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target, inet_address_vector_topology_change pending_endpoints, db::write_type type,
-            tracing::trace_state_ptr tr_state, allow_hints allow_hints = allow_hints::yes);
+            tracing::trace_state_ptr tr_state, allow_hints allow_hints = allow_hints::yes, db::allow_per_partition_rate_limit allow_limit = db::allow_per_partition_rate_limit::no);
 
     // Send a mutation to a specific remote target as a hint.
     // Unlike regular mutations during write operations, hints are sent on the streaming connection
