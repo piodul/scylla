@@ -4485,9 +4485,10 @@ storage_proxy::query(schema_ptr s,
     lw_shared_ptr<query::read_command> cmd,
     dht::partition_range_vector&& partition_ranges,
     db::consistency_level cl,
+    db::allow_per_partition_rate_limit allow_limit,
     storage_proxy::coordinator_query_options query_options)
 {
-    return query_result(std::move(s), std::move(cmd), std::move(partition_ranges), cl, std::move(query_options))
+    return query_result(std::move(s), std::move(cmd), std::move(partition_ranges), cl, allow_limit, std::move(query_options))
             .then(utils::result_into_future<result<storage_proxy::coordinator_query_result>>);
 }
 
@@ -4496,6 +4497,7 @@ storage_proxy::query_result(schema_ptr s,
     lw_shared_ptr<query::read_command> cmd,
     dht::partition_range_vector&& partition_ranges,
     db::consistency_level cl,
+    db::allow_per_partition_rate_limit allow_limit,
     storage_proxy::coordinator_query_options query_options)
 {
     if (slogger.is_enabled(logging::log_level::trace) || qlogger.is_enabled(logging::log_level::trace)) {
@@ -4503,7 +4505,7 @@ storage_proxy::query_result(schema_ptr s,
         auto query_id = next_id++;
 
         slogger.trace("query {}.{} cmd={}, ranges={}, id={}", s->ks_name(), s->cf_name(), *cmd, partition_ranges, query_id);
-        return do_query(s, cmd, std::move(partition_ranges), cl, /* TODO */ db::allow_per_partition_rate_limit::no, std::move(query_options)).then_wrapped([query_id, cmd, s] (future<result<coordinator_query_result>> f) -> result<coordinator_query_result> {
+        return do_query(s, cmd, std::move(partition_ranges), cl, allow_limit, std::move(query_options)).then_wrapped([query_id, cmd, s] (future<result<coordinator_query_result>> f) -> result<coordinator_query_result> {
             auto rres = utils::result_try([&] {
                 return f.get();
             },  utils::result_catch_dots([&] (auto&& handle) {
@@ -4526,7 +4528,7 @@ storage_proxy::query_result(schema_ptr s,
         });
     }
 
-    return do_query(s, cmd, std::move(partition_ranges), cl, /* TODO */ db::allow_per_partition_rate_limit::no, std::move(query_options));
+    return do_query(s, cmd, std::move(partition_ranges), cl, allow_limit, std::move(query_options));
 }
 
 future<result<storage_proxy::coordinator_query_result>>
@@ -4760,7 +4762,7 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
                 ++get_stats().cas_failed_read_round_optimization;
 
                 auto pr = partition_ranges; // cannot move original because it can be reused during retry
-                auto cqr = co_await query(schema, cmd, std::move(pr), cl, query_options);
+                auto cqr = co_await query(schema, cmd, std::move(pr), cl, db::allow_per_partition_rate_limit::no, query_options);
                 qr = std::move(cqr.query_result);
             }
 

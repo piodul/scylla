@@ -2752,7 +2752,7 @@ system_keyspace::query(distributed<service::storage_proxy>& proxy, const sstring
     schema_ptr schema = db.find_schema(ks_name, cf_name);
     auto slice = partition_slice_builder(*schema).build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), proxy.local().get_max_result_size(slice));
-    return proxy.local().query(schema, cmd, {query::full_partition_range}, db::consistency_level::ONE,
+    return proxy.local().query(schema, cmd, {query::full_partition_range}, db::consistency_level::ONE, db::allow_per_partition_rate_limit::no,
             {db::no_timeout, empty_service_permit(), service::client_state::for_internal_calls(), nullptr}).then([schema, cmd] (auto&& qr) {
         return make_lw_shared<query::result_set>(query::result_set::from_raw_result(schema, cmd->slice, *qr.query_result));
     });
@@ -2768,7 +2768,7 @@ system_keyspace::query(distributed<service::storage_proxy>& proxy, const sstring
         .build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), proxy.local().get_max_result_size(slice));
 
-    return proxy.local().query(schema, cmd, {dht::partition_range::make_singular(key)}, db::consistency_level::ONE,
+    return proxy.local().query(schema, cmd, {dht::partition_range::make_singular(key)}, db::consistency_level::ONE, db::allow_per_partition_rate_limit::no,
             {db::no_timeout, empty_service_permit(), service::client_state::for_internal_calls(), nullptr}).then([schema, cmd] (auto&& qr) {
         return make_lw_shared<query::result_set>(query::result_set::from_raw_result(schema, cmd->slice, *qr.query_result));
     });

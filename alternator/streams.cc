@@ -879,7 +879,7 @@ future<executor::request_return_type> executor::get_records(client_state& client
     auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, _proxy.get_max_result_size(partition_slice),
             query::row_limit(limit * mul));
 
-    return _proxy.query(schema, std::move(command), std::move(partition_ranges), cl, service::storage_proxy::coordinator_query_options(default_timeout(), std::move(permit), client_state)).then(
+    return _proxy.query(schema, std::move(command), std::move(partition_ranges), cl, db::allow_per_partition_rate_limit::no, service::storage_proxy::coordinator_query_options(default_timeout(), std::move(permit), client_state)).then(
             [this, schema, partition_slice = std::move(partition_slice), selection = std::move(selection), start_time = std::move(start_time), limit, key_names = std::move(key_names), attr_names = std::move(attr_names), type, iter, high_ts] (service::storage_proxy::coordinator_query_result qr) mutable {       
         cql3::selection::result_set_builder builder(*selection, gc_clock::now(), cql_serialization_format::latest());
         query::result_view::consume(*qr.query_result, partition_slice, cql3::selection::result_set_builder::visitor(builder, *schema, *selection));

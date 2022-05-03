@@ -179,6 +179,7 @@ static bool has_clustering_keys(const schema& s, const query::read_command& cmd)
                 std::move(command),
                 std::move(ranges),
                 _options.get_consistency(),
+                db::allow_per_partition_rate_limit::yes,
                 {timeout, _state.get_permit(), _state.get_client_state(), _state.get_trace_state(), std::move(_last_replicas), _query_read_repair_decision});
     }
 

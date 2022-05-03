@@ -131,7 +131,7 @@ modification_statement::get_mutations(query_processor& qp, const query_options& 
     if (requires_read()) {
         lw_shared_ptr<query::read_command> cmd = read_command(qp, ranges, cl);
         // FIXME: ignoring "local"
-        f = qp.proxy().query(s, cmd, dht::partition_range_vector(keys), cl,
+        f = qp.proxy().query(s, cmd, dht::partition_range_vector(keys), cl, db::allow_per_partition_rate_limit::no,
                 {timeout, qs.get_permit(), qs.get_client_state(), qs.get_trace_state()}).then(
 
                 [this, cmd] (auto cqr) {

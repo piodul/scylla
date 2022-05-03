@@ -618,6 +618,7 @@ public:
         lw_shared_ptr<query::read_command> cmd,
         dht::partition_range_vector&& partition_ranges,
         db::consistency_level cl,
+        db::allow_per_partition_rate_limit allow_limit,
         coordinator_query_options optional_params);
 
     /*
@@ -628,6 +629,7 @@ public:
         lw_shared_ptr<query::read_command> cmd,
         dht::partition_range_vector&& partition_ranges,
         db::consistency_level cl,
+        db::allow_per_partition_rate_limit allow_limit,
         coordinator_query_options optional_params);
 
     future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_mutations_locally(
