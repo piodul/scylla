@@ -299,6 +299,7 @@ private:
     future<result<coordinator_query_result>> query_singular(lw_shared_ptr<query::read_command> cmd,
             dht::partition_range_vector&& partition_ranges,
             db::consistency_level cl,
+            db::allow_per_partition_rate_limit allow_limit,
             coordinator_query_options optional_params);
     response_id_type register_response_handler(shared_ptr<abstract_write_response_handler>&& h);
     void remove_response_handler(response_id_type id);
@@ -373,6 +374,7 @@ private:
         lw_shared_ptr<query::read_command> cmd,
         dht::partition_range_vector&& partition_ranges,
         db::consistency_level cl,
+        db::allow_per_partition_rate_limit allow_limit,
         coordinator_query_options optional_params);
     future<coordinator_query_result> do_query_with_paxos(schema_ptr,
         lw_shared_ptr<query::read_command> cmd,
