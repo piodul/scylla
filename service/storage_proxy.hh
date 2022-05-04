@@ -340,7 +340,8 @@ private:
             tracing::trace_state_ptr trace_state,
             const inet_address_vector_replica_set& preferred_endpoints,
             bool& is_bounced_read,
-            service_permit permit);
+            service_permit permit,
+            db::allow_per_partition_rate_limit allow_limit);
     future<rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> query_result_local(schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr,
                                                                            query::result_options opts,
                                                                            tracing::trace_state_ptr trace_state,
