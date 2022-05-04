@@ -7,6 +7,7 @@
  */
 
 #include "log.hh"
+#include "replica/database_fwd.hh"
 #include "utils/lister.hh"
 #include "replica/database.hh"
 #include <seastar/core/future-util.hh>
@@ -1282,6 +1283,32 @@ database::existing_index_names(const sstring& ks_name, const sstring& cf_to_excl
     return names;
 }
 
+static db::rate_limiter::can_proceed account_singular_ranges_to_rate_limit(db::rate_limiter& limiter, column_family& cf, const dht::partition_range_vector& ranges) {
+    using can_proceed = db::rate_limiter::can_proceed;
+
+    auto table_limit = cf.schema()->per_partition_rate_limit_options().get_max_reads_per_second();
+    if (!table_limit) {
+        // Table is not rate limited
+        return can_proceed::yes;
+    }
+
+    can_proceed ret = can_proceed::yes;
+
+    auto& read_label = cf.get_rate_limiter_label_for_reads();
+    for (const auto& range : ranges) {
+        if (!range.is_singular()) {
+            continue;
+        }
+        auto token = dht::token::to_int64(ranges.front().start()->value().token());
+        if (limiter.account_operation(read_label, token, *table_limit) == db::rate_limiter::can_proceed::no) {
+            // Don't return immediately - account all ranges first
+            ret = can_proceed::no;
+        }
+    }
+
+    return ret;
+}
+
 future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_options opts, const dht::partition_range_vector& ranges,
                 tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout, db::allow_per_partition_rate_limit allow_limit) {
@@ -1292,14 +1319,8 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
 
     column_family& cf = find_column_family(cmd.cf_id);
 
-    if (allow_limit && ranges.front().is_singular()) {
-        if (auto table_limit = s->per_partition_rate_limit_options().get_max_reads_per_second()) {
-            auto& read_label = cf.get_rate_limiter_label_for_reads();
-            auto token = dht::token::to_int64(ranges.front().start()->value().token());
-            if (_rate_limiter.account_operation(read_label, token, *table_limit) == db::rate_limiter::can_proceed::no) {
-                co_return coroutine::make_exception(replica::rate_limit_exception());
-            }
-        }
+    if (allow_limit && account_singular_ranges_to_rate_limit(_rate_limiter, cf, ranges) == db::rate_limiter::can_proceed::no) {
+        co_await coroutine::return_exception(replica::rate_limit_exception());
     }
 
     auto& semaphore = get_reader_concurrency_semaphore();
