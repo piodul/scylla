@@ -6,7 +6,9 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <numbers>
 #include <array>
+#include <random>
 #include <seastar/core/metrics.hh>
 
 #include "utils/murmur_hash.hh"
@@ -18,18 +20,23 @@ static constexpr size_t hash_bits = 16;
 static constexpr size_t bucket_count = 1 << hash_bits;
 static constexpr size_t window_size = 10000;
 
+// TODO: Reconsider the windows stuff
+
 void rate_limiter_base::on_timer() noexcept {
     _metrics.load_factor = double(_current_allocations_in_generation) / double(bucket_count);
 
-    if (_current_allocations_in_generation == 0) {
-        // No reads/writes happened since the last generation change,
-        // so no need to switch to the next generation.
-        return;
-    }
+    // if (_current_allocations_in_generation == 0) {
+    //     // No reads/writes happened since the last generation change,
+    //     // so no need to switch to the next generation.
+    //     return;
+    // }
 
     _current_window = 0;
     _current_allocations_in_generation = 0;
     _current_ops_in_window = 0;
+
+    // TODO: the lazy clearing stuff
+    // There are so many generations that clearing might not make sense
 
     // Labels have 32 bits and are issued sequentially, so there is some risk
     // that it will wrap around. This may result in some very old labels
@@ -50,16 +57,16 @@ void rate_limiter_base::on_timer() noexcept {
     // with current parameters we perform a bucket update
     // every 2^(32 - 16) / 2 = 2^15 labels assigned.
 
-    constexpr size_t shift = 32 - hash_bits - 1;
-    constexpr size_t mask = (1 << (32 - shift)) - 1;
+    // constexpr size_t shift = 32 - hash_bits - 1;
+    // constexpr size_t mask = (1 << (32 - shift)) - 1;
 
-    const size_t invalidate_begin = _first_active_label >> shift;
-    const size_t invalidate_end = _next_label >> shift;
+    // const size_t invalidate_begin = _first_active_label >> shift;
+    // const size_t invalidate_end = _next_label >> shift;
 
-    for (size_t i = invalidate_begin; i != invalidate_end; i = (i + 1) & mask) {
-        // We are changing the generation now, so all buckets are considered empty.
-        _buckets[i % bucket_count].label = _next_label - 1;
-    }
+    // for (size_t i = invalidate_begin; i != invalidate_end; i = (i + 1) & mask) {
+    //     // We are changing the generation now, so all buckets are considered empty.
+    //     _buckets[i % bucket_count].label = _next_label - 1;
+    // }
 
     // Invalidate all labels from the previous interval and start issuing again.
     _first_active_label = _next_label;
@@ -88,10 +95,12 @@ rate_limiter_base::bucket* rate_limiter_base::get_bucket(uint32_t label, uint64_
 
     static constexpr size_t max_probes = 32;
     for (size_t i = 0; i < max_probes; i++) {
-        // Quadratic probing - every iteration jumps farther than the previous one
+        // Quadratic probing - every iteration jumps further than the previous one
         hash = (hash + i) % bucket_count;
         bucket& b = _buckets[hash];
         ++_metrics.probe_count;
+
+        bucket_refresh(b);
 
         if (bucket_is_empty(b)) {
             // We encountered an empty bucket, i.e. it was not initialized
@@ -159,10 +168,10 @@ rate_limiter_base::bucket* rate_limiter_base::get_bucket(uint32_t label, uint64_
 }
 
 size_t rate_limiter_base::compute_hash(uint32_t label, uint64_t token) noexcept {
-    // The map key is a tuple (token, key) + current generation as "salt"
+    // The map key is a tuple (token, key) + salt
     // The key is hashed with murmur hash for good hash quality
 
-    static constexpr size_t key_length = sizeof(token) + sizeof(label) + sizeof(_current_generation);
+    static constexpr size_t key_length = sizeof(token) + sizeof(label) + sizeof(_salt);
 
     std::array<uint8_t, key_length> key;
     uint8_t* ptr = key.data();
@@ -170,16 +179,21 @@ size_t rate_limiter_base::compute_hash(uint32_t label, uint64_t token) noexcept 
     ptr += sizeof(token);
     memcpy(ptr, &label, sizeof(label));
     ptr += sizeof(label);
-    memcpy(ptr, &_current_generation, sizeof(_current_generation));
+    memcpy(ptr, &_salt, sizeof(_salt));
 
     std::array<uint64_t, 2> out;
     utils::murmur_hash::hash3_x64_128(key.data(), key_length, 0, out);
     return out[0];
 }
 
+void rate_limiter_base::bucket_refresh(rate_limiter_base::bucket& b) noexcept {
+    uint32_t gdiff = _current_generation - b.generation;
+    b.op_count = (gdiff < 32) ? (b.op_count >> gdiff) : 0;
+    b.generation = _current_generation;
+}
+
 bool rate_limiter_base::bucket_is_empty(const rate_limiter_base::bucket& b) noexcept {
-    // The bucket is empty if its label was not assigned within this generation
-    return b.label - _first_active_label >= _next_label - _first_active_label;
+    return b.op_count == 0;
 }
 
 bool rate_limiter_base::bucket_is_expired(const rate_limiter_base::bucket& b) noexcept {
@@ -224,15 +238,16 @@ void rate_limiter_base::register_metrics() {
 }
 
 rate_limiter_base::rate_limiter_base()
-        : _buckets(bucket_count, bucket{}) {
+        : _random(std::random_device{}())
+        , _salt(_random())
+        , _buckets(bucket_count, bucket{}) {
     
     register_metrics();
 }
 
 rate_limiter_base::can_proceed rate_limiter_base::account_operation(label& l, uint64_t token, uint64_t limit) noexcept {
     // If the label is no longer valid, refresh it
-    if (l._generation != _current_generation) {
-        l._generation = _current_generation;
+    if (l._label == 0) {
         l._label = _next_label++;
     }
 
@@ -243,19 +258,29 @@ rate_limiter_base::can_proceed rate_limiter_base::account_operation(label& l, ui
         // Assume that it's OK to admit the operation.
         return can_proceed::yes;
     }
-    if (bucket_operation_count(*b) + 1 <= limit) {
-        ++b->op_count;
-        ++_current_ops_in_window;
-        if (_current_ops_in_window == window_size) {
-            // Every `window_size` operations, virtually decrement all entries
-            // by one. We implement it by always subtracting the `_current_window`
-            // when comparing the count in the bucket with the limit.
-            ++_current_window;
-            _current_ops_in_window = 0;
-        }
+    ++b->op_count;
+    // ++_current_ops_in_window;
+    // if (_current_ops_in_window == window_size) {
+    //     // Every `window_size` operations, virtually decrement all entries
+    //     // by one. We implement it by always subtracting the `_current_window`
+    //     // when comparing the count in the bucket with the limit.
+    //     ++_current_window;
+    //     _current_ops_in_window = 0;
+    // }
+    // On each generation change, we halve the bucket counts, therefore
+    // a partition with X ops/s will stabilize at 2X hits at the end
+    // of each generation.
+    const auto count = bucket_operation_count(*b);
+    if (count <= 2 * limit) {
         return can_proceed::yes;
     } else {
-        return can_proceed::no;
+        // TODO: Adjust for the period
+        const double chance = double(limit) / (double(count) * std::numbers::ln2);
+        if (std::uniform_real_distribution<double>(0.0, 1.0)(_random) < chance) {
+            return can_proceed::yes;
+        } else {
+            return can_proceed::no;
+        }
     }
 }
 

@@ -13,10 +13,11 @@
 #include <chrono>
 #include <limits>
 #include <concepts>
+#include <vector>
+#include <optional>
+#include <random>
 
 #include <seastar/core/future.hh>
-#include <seastar/core/shared_ptr.hh>
-#include <seastar/core/loop.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/metrics_registration.hh>
@@ -46,7 +47,7 @@
 // Each hashmap bucket is identified by the (label, token) pair.
 //
 // The structure's parameters were chosen to easily support 200k operations
-// per second in the worst case. It takes up about 1MB per shard and supports
+// per second in the worst case. It takes up about 1.25MB per shard and supports
 // counting operations from multiple tables at once.
 //
 // All operations are O(1). The structure maintains a timer which wakes up
@@ -87,6 +88,8 @@ private:
         // If the number drops to zero or below, the bucket is considered
         // "expired" and may be overwritten by another operation.
         uint32_t op_count = 0;
+
+        uint32_t generation = 0;
     };
 
 public:
@@ -98,11 +101,7 @@ public:
     // separate labels.
     struct label {
     private:
-        // Used to determine validity of the label.
-        // If `_generation != _current_generation`, then all buckets
-        // with this label are considered invalid and `_label` will be
-        // reassigned by the rate limiter.
-        uint32_t _generation = 0;
+        // TODO: Label generations
 
         // The current ID used to identify the label in the rate limiter.
         // On generation switch, it becomes invalid and it is lazily reassigned.
@@ -124,7 +123,10 @@ private:
 
     uint32_t _next_label = 1;
     uint32_t _first_active_label = 1;
-    uint32_t _current_generation = 1;
+    uint32_t _current_generation = 0;
+
+    std::default_random_engine _random;
+    const uint32_t _salt;
 
     // TODO: We know in compile time how many buckets are there,
     // so it might be more efficient to split into chunks manually
@@ -137,6 +139,7 @@ private:
     bucket* get_bucket(uint32_t table, uint64_t token) noexcept;
     size_t compute_hash(uint32_t label, uint64_t token) noexcept;
 
+    void bucket_refresh(bucket& b) noexcept;
     bool bucket_is_empty(const bucket& b) noexcept;
     bool bucket_is_expired(const bucket& b) noexcept;
     uint32_t bucket_operation_count(const bucket& b) noexcept;
