@@ -5035,14 +5035,16 @@ storage_proxy::handle_write(netw::messaging_service::msg_addr src_addr, rpc::opt
                     });
                 }).handle_exception([reply_to, shard, &p, &errors] (std::exception_ptr eptr) {
                     seastar::log_level l = seastar::log_level::warn;
-                    if (is_timeout_exception(eptr)) {
+                    errors.count++;
+                    errors.local = replica::encode_replica_exception(eptr);
+                    if (std::holds_alternative<replica::timeout_exception>(errors.local.reason)) {
                         // ignore timeouts so that logs are not flooded.
                         // database total_writes_timedout counter was incremented.
                         l = seastar::log_level::debug;
+                    } else if (std::holds_alternative<replica::rate_limit_exception>(errors.local.reason)) {
+                        l = seastar::log_level::debug;
                     }
                     slogger.log(l, "Failed to apply mutation from {}#{}: {}", reply_to, shard, eptr);
-                    errors.count++;
-                    errors.local = replica::encode_replica_exception(std::move(eptr));
                 }),
                 parallel_for_each(forward.begin(), forward.end(), [reply_to, shard, response_id, &m, &p, trace_state_ptr,
                                   timeout, &errors, forward_fn = std::move(forward_fn)] (gms::inet_address forward) {

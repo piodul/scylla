@@ -27,6 +27,8 @@ static exception_variant encode_replica_exception_or_fail(std::exception& ex) {
         return std::move(*e);
     } else if (auto* e = dynamic_cast<virtual_table_update_exception*>(&ex)) {
         return std::move(*e);
+    } else if (auto* e = dynamic_cast<rate_limit_exception*>(&ex)) {
+        return std::move(*e);
     } else {
         if (is_timeout_exception(ex)) {
             return timeout_exception();
