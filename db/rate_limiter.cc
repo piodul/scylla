@@ -6,11 +6,14 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <boost/math/special_functions/math_fwd.hpp>
+#include <cmath>
 #include <numbers>
 #include <array>
 #include <random>
 #include <seastar/core/metrics.hh>
 
+#include "utils/small_vector.hh"
 #include "utils/murmur_hash.hh"
 #include "db/rate_limiter.hh"
 
@@ -245,6 +248,66 @@ rate_limiter_base::rate_limiter_base()
     register_metrics();
 }
 
+struct binomial_coefficients {
+private:
+    std::vector<double> _coeffs;
+    uint8_t _max_n;
+
+public:
+    binomial_coefficients()
+            : _coeffs{1.0}
+            , _max_n(0)
+    {}
+
+    double get(uint64_t n, uint64_t k) {
+        while (_max_n < n) {
+            const uint64_t old_size = _coeffs.size();
+
+            // Reserve so that the following push_backs do not throw
+            _coeffs.reserve(old_size + _max_n + 2);
+
+            _coeffs.push_back(1.0);
+            for (uint64_t i = old_size - _max_n; i < old_size; i++) {
+                _coeffs.push_back(_coeffs[i - 1] + _coeffs[i]);
+            }
+            _coeffs.push_back(1.0);
+
+            _max_n++;
+        }
+
+        const uint64_t base = (n + 1) * n / 2;
+        return _coeffs[base + k];
+    }
+};
+
+static double adjust_replica_roll(uint8_t cl_needed, uint8_t rf, double roll) {
+    static thread_local binomial_coefficients coefficients;
+
+    bool need_flip = false;
+    double ret = 0.0;
+
+    if (cl_needed < rf/2) {
+        // The chance of having at least CL out of RF successes
+        // is the same as having at least RF - CL failures out of RF successes.
+        // We can use this to save on some iterations in the next loop.
+        cl_needed = rf - cl_needed;
+        roll = 1.0 - roll;
+        need_flip = true;
+    }
+
+    // TODO: Use the Horner's method
+    for (uint8_t i = cl_needed; i <= rf; i++) {
+        // In this iteration, include the probability that
+        // - exactly `i` replicas will pass the local check
+        // - exactly `rf - i` replicas will not pass the local check
+        ret += coefficients.get(rf, i) // Choose `i` replicas from `rf` total
+                * std::pow(roll, rf - i) // `i` trials will succeed
+                * std::pow(1.0 - roll, i); // `rf - i` trials will fail
+    }
+
+    return need_flip ? 1.0 - ret : ret;
+}
+
 rate_limiter_base::can_proceed rate_limiter_base::account_operation(label& l, uint64_t token, uint64_t limit) noexcept {
     // If the label is no longer valid, refresh it
     if (l._label == 0) {
@@ -267,16 +330,49 @@ rate_limiter_base::can_proceed rate_limiter_base::account_operation(label& l, ui
     //     ++_current_window;
     //     _current_ops_in_window = 0;
     // }
-    // On each generation change, we halve the bucket counts, therefore
+    // On each generation change we halve the bucket counts, therefore
     // a partition with X ops/s will stabilize at 2X hits at the end
     // of each generation.
     const auto count = bucket_operation_count(*b);
     if (count <= 2 * limit) {
         return can_proceed::yes;
     } else {
-        // TODO: Adjust for the period
-        const double chance = double(limit) / (double(count) * std::numbers::ln2);
-        if (std::uniform_real_distribution<double>(0.0, 1.0)(_random) < chance) {
+        // As mentioned before, assuming a fixed operation rate, the operation
+        // count in a bucket will oscillate between X at the beginning of the
+        // generation and 2X at the end. In order to only accept `limit`
+        // operations within a generation, we need to reject with probability
+        // P_c(x), where P_c(x) is a function such that, integrated over [X, 2X]
+        // will be equal to `limit`. `P_c(x) = limit / (x * ln 2)` satisfies
+        // this criterion.
+        const double coordinator_chance = double(limit) / (double(count) * std::numbers::ln2);
+
+        // We have just calculated the desired probability of success
+        // of the whole operation. However, replicas using this probability
+        // would be wrong as the actual probability of the whole operation
+        // depends on individual replicas' probability, RF and the number
+        // of replicas needed for CL.
+        //
+        // For simplicity, let's assume that all replicas use the same
+        // probability (the assumption seems to be good enough in practice).
+        // Then, the relation between the probabilities can be expressed
+        // as follows:
+        //
+        //   P_c(x) = F_cl,rf(P_r(x))
+        //
+        //   P_r(x) = F_cl,rf^-1(P_c(x)) // F is monotonically increasing over [0, 1]
+        //
+        // The `F` function is a monotonic polynomial which can be hard to invert,
+        // so instead of drawing a random number from [0, 1) interval and
+        // comparing it to `P_r(x)`, we instead apply `F` to the random variable
+        // and then compare it to `P_c(x)`:
+        //
+        //   X < P_r(x) = F_cl,rf^-1(P_c(x))
+        //
+        //   F_cl,rf(X) < P_c(x)
+        //
+        const double roll = std::uniform_real_distribution<double>(0.0, 1.0)(_random);
+        const double roll_adjusted = adjust_replica_roll(1, 2, roll);
+        if (roll_adjusted < coordinator_chance) {
             return can_proceed::yes;
         } else {
             return can_proceed::no;
