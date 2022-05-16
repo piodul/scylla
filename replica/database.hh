@@ -1509,6 +1509,16 @@ public:
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
 
+    /// Tries to account given operation to the rate limit when the coordinator is a replica.
+    /// This function MUST NOT be called on nodes/shards which are not replicas of given operation.
+    ///
+    /// nullopt -> operation should not be rate limited
+    /// can_proceed::no -> operation should be rejected
+    /// can_proceed::yes -> operation should be accepted
+    std::optional<db::rate_limiter::can_proceed> account_coordinator_operation_to_rate_limit(table& tbl, const dht::token& token,
+            db::per_partition_rate_limit::account_and_enforce account_and_enforce_info,
+            db::per_partition_rate_limit_options::operation_kind op_kind);
+
     future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
                                                                   const dht::partition_range_vector& ranges, tracing::trace_state_ptr trace_state,
                                                                   db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info = std::monostate{});

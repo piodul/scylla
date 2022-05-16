@@ -1327,6 +1327,19 @@ request_class classify_request(const database_config& _dbcfg) {
 
 } // anonymous namespace
 
+std::optional<db::rate_limiter::can_proceed> database::account_coordinator_operation_to_rate_limit(table& tbl, const dht::token& token,
+        db::per_partition_rate_limit::account_and_enforce account_and_enforce_info,
+        db::per_partition_rate_limit_options::operation_kind op_kind) {
+    auto s = tbl.schema();
+
+    std::optional<uint32_t> table_limit = s->per_partition_rate_limit_options().get_max_ops_per_second(op_kind);
+    if (!table_limit || classify_request(_dbcfg) != request_class::user) {
+        return std::nullopt;
+    }
+
+    db::rate_limiter::label& lbl = tbl.get_rate_limiter_label_for_op_kind(op_kind);
+    return _rate_limiter.account_operation(lbl, dht::token::to_int64(token), *table_limit, account_and_enforce_info.get_random_variable_as_double());
+}
 
 static db::rate_limiter::can_proceed account_singular_ranges_to_rate_limit(
         db::rate_limiter& limiter, column_family& cf,
