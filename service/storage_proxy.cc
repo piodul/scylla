@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: (AGPL-3.0-or-later and Apache-2.0)
  */
 
+#include <random>
 #include <seastar/core/sleep.hh>
 #include <seastar/util/defer.hh>
 #include "partition_range_compat.hh"
@@ -152,6 +153,67 @@ sstring get_local_dc() {
 
 unsigned storage_proxy::cas_shard(const schema& s, dht::token token) {
     return dht::shard_of(s, token);
+}
+
+static uint32_t random_variable_for_rate_limit() {
+    static thread_local std::default_random_engine re{std::random_device{}()};
+    static thread_local std::uniform_int_distribution<uint32_t> dist(0, 0xFFFFFFFF);
+    return dist(re);
+}
+
+static result<db::per_partition_rate_limit::info> choose_rate_limit_info(
+        replica::database& db,
+        db::allow_per_partition_rate_limit allow_limit,
+        bool coordinator_in_replica_set,
+        db::per_partition_rate_limit_options::operation_kind op_kind,
+        const schema_ptr& s,
+        const dht::token& token,
+        tracing::trace_state_ptr tr_state) {
+
+    if (!allow_limit) {
+        // Rate limiting of this operation is disabled
+        slogger.trace("Operation is not rate limited");
+        tracing::trace(tr_state, "Operation is not rate limited");
+        return std::monostate();
+    }
+
+    db::per_partition_rate_limit::account_and_enforce enforce_info{
+        .random_variable = random_variable_for_rate_limit(),
+    };
+    if (coordinator_in_replica_set && dht::shard_of(*s, token) == this_shard_id()) {
+        auto& cf = db.find_column_family(s);
+        auto decision = db.account_coordinator_operation_to_rate_limit(cf, token, enforce_info, op_kind);
+        if (decision) {
+            if (decision == db::rate_limiter::can_proceed::yes) {
+                // The coordinator has decided to accept the operation.
+                // Tell other replicas only to account, but not reject
+                slogger.trace("Per-partition rate limiting: coordinator accepted");
+                tracing::trace(tr_state, "Per-partition rate limiting: coordinator accepted");
+                return db::per_partition_rate_limit::account_only{};
+            } else {
+                // The coordinator has decided to reject, abort the operation
+                slogger.trace("Per-partition rate limiting: coordinator rejected");
+                tracing::trace(tr_state, "Per-partition rate limiting: coordinator rejected");
+                return coordinator_exception_container(exceptions::rate_limit_exception(s->ks_name(), s->cf_name()));
+            }
+        }
+    }
+
+    // The coordinator is not a replica. The decision whether to accept
+    // or reject is left for replicas.
+    slogger.trace("Per-partition rate limiting: replicas will decide");
+    tracing::trace(tr_state, "Per-partition rate limiting: replicas will decide");
+    return enforce_info;
+}
+
+static inline db::per_partition_rate_limit::info adjust_rate_limit_for_local_operation(
+        const db::per_partition_rate_limit::info& info) {
+    if (std::holds_alternative<db::per_partition_rate_limit::account_only>(info)) {
+        // In this case, the coordinator has already accounted the operation,
+        // so don't do it again on this shard
+        return std::monostate();
+    }
+    return info;
 }
 
 class mutation_holder {
