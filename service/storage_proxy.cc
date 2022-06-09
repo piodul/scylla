@@ -163,19 +163,11 @@ static uint32_t random_variable_for_rate_limit() {
 
 static result<db::per_partition_rate_limit::info> choose_rate_limit_info(
         replica::database& db,
-        db::allow_per_partition_rate_limit allow_limit,
         bool coordinator_in_replica_set,
         db::per_partition_rate_limit_options::operation_kind op_kind,
         const schema_ptr& s,
         const dht::token& token,
         tracing::trace_state_ptr tr_state) {
-
-    if (!allow_limit) {
-        // Rate limiting of this operation is disabled
-        slogger.trace("Operation is not rate limited");
-        tracing::trace(tr_state, "Operation is not rate limited");
-        return std::monostate();
-    }
 
     db::per_partition_rate_limit::account_and_enforce enforce_info{
         .random_variable = random_variable_for_rate_limit(),
@@ -2059,11 +2051,17 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     std::partition_copy(all.begin(), all.end(), std::back_inserter(live_endpoints),
             std::back_inserter(dead_endpoints), std::bind_front(std::mem_fn(&gms::gossiper::is_alive), &_gossiper));
 
-    auto r_rate_limit_info = choose_rate_limit_info(_db.local(), allow_limit, coordinator_in_replica_set, db::per_partition_rate_limit_options::operation_kind::write, s, token, tr_state);
-    if (!r_rate_limit_info) {
-        return std::move(r_rate_limit_info).as_failure();
+    db::per_partition_rate_limit::info rate_limit_info;
+    if (allow_limit && s->per_partition_rate_limit_options().get_max_reads_per_second()) {
+        auto r_rate_limit_info = choose_rate_limit_info(_db.local(), coordinator_in_replica_set, db::per_partition_rate_limit_options::operation_kind::write, s, token, tr_state);
+        if (!r_rate_limit_info) {
+            return std::move(r_rate_limit_info).as_failure();
+        }
+        rate_limit_info = r_rate_limit_info.value();
+    } else {
+        slogger.trace("Operation is not rate limited");
+        tracing::trace(tr_state, "Operation is not rate limited");
     }
-    auto rate_limit_info = r_rate_limit_info.value();
 
     slogger.trace("creating write handler with live: {} dead: {}", live_endpoints, dead_endpoints);
     tracing::trace(tr_state, "Creating write handler with live: {} dead: {}", live_endpoints, dead_endpoints);
@@ -4141,12 +4139,17 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
     size_t block_for = db::block_for(ks, cl);
     auto p = shared_from_this();
 
-    auto r_rate_limit_info = choose_rate_limit_info(_db.local(), cmd->allow_limit, !is_read_non_local,
-            db::per_partition_rate_limit_options::operation_kind::read, schema, token, trace_state);
-    if (!r_rate_limit_info) {
-        return std::move(r_rate_limit_info).as_failure();
+    db::per_partition_rate_limit::info rate_limit_info;
+    if (cmd->allow_limit && schema->per_partition_rate_limit_options().get_max_reads_per_second()) {
+        auto r_rate_limit_info = choose_rate_limit_info(_db.local(), !is_read_non_local, db::per_partition_rate_limit_options::operation_kind::write, schema, token, trace_state);
+        if (!r_rate_limit_info) {
+            return std::move(r_rate_limit_info).as_failure();
+        }
+        rate_limit_info = r_rate_limit_info.value();
+    } else {
+        slogger.trace("Operation is not rate limited");
+        tracing::trace(trace_state, "Operation is not rate limited");
     }
-    auto rate_limit_info = r_rate_limit_info.value();
 
     // Speculative retry is disabled *OR* there are simply no extra replicas to speculate.
     if (retry_type == speculative_retry::type::NONE || block_for == all_replicas.size()
