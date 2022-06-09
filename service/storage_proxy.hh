@@ -200,6 +200,28 @@ public:
         }
     };
 
+
+    class coordinator_mutate_options {
+        // TODO: Timeout?
+
+    public:
+        service_permit permit;
+        tracing::trace_state_ptr trace_state;
+        db::consistency_level cl;
+        db::allow_per_partition_rate_limit allow_limit;
+
+        coordinator_mutate_options(
+                service_permit permit_,
+                db::consistency_level cl_,
+                db::allow_per_partition_rate_limit allow_limit_,
+                tracing::trace_state_ptr trace_state_ = nullptr)
+            : permit(std::move(permit_))
+            , trace_state(std::move(trace_state_))
+            , cl(cl_)
+            , allow_limit(allow_limit_) {
+        }
+    };
+
     using coordinator_query_result = storage_proxy_coordinator_query_result;
 
     // Holds  a list of endpoints participating in CAS request, for a given
@@ -266,12 +288,9 @@ private:
             future<result<>>,
             storage_proxy*,
             std::vector<mutation>,
-            db::consistency_level,
+            coordinator_mutate_options,
             clock_type::time_point,
-            tracing::trace_state_ptr,
-            service_permit,
             bool,
-            db::allow_per_partition_rate_limit,
             lw_shared_ptr<cdc::operation_result_tracker>> _mutate_stage;
     netw::connection_drop_slot_t _connection_dropped;
     netw::connection_drop_registration_t _condrop_registration;
@@ -312,17 +331,14 @@ private:
     future<result<>> response_wait(response_id_type id, clock_type::time_point timeout);
     ::shared_ptr<abstract_write_response_handler>& get_write_response_handler(storage_proxy::response_id_type id);
     result<response_id_type> create_write_response_handler_helper(schema_ptr s, const dht::token& token,
-            std::unique_ptr<mutation_holder> mh, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state,
-            service_permit permit, db::allow_per_partition_rate_limit allow_limit);
-    result<response_id_type> create_write_response_handler(replica::keyspace& ks, db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m, inet_address_vector_replica_set targets,
-            const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change, tracing::trace_state_ptr tr_state, storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info);
-    result<response_id_type> create_write_response_handler(const mutation&, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
-    result<response_id_type> create_write_response_handler(const hint_wrapper&, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
-    result<response_id_type> create_write_response_handler(const std::unordered_map<gms::inet_address, std::optional<mutation>>&, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
-    result<response_id_type> create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, shared_ptr<paxos_response_handler>, dht::token>& proposal,
-            db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
-    result<response_id_type> create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>& meta,
-            db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
+            std::unique_ptr<mutation_holder> mh, db::write_type type, coordinator_mutate_options coordinator_options);
+    result<response_id_type> create_write_response_handler(replica::keyspace& ks, db::write_type type, std::unique_ptr<mutation_holder> m, coordinator_mutate_options coordinator_options, inet_address_vector_replica_set targets,
+            const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change, storage_proxy::write_stats& stats, db::per_partition_rate_limit::info rate_limit_info);
+    result<response_id_type> create_write_response_handler(const mutation&, db::write_type type, coordinator_mutate_options coordinator_options);
+    result<response_id_type> create_write_response_handler(const hint_wrapper&, db::write_type type, coordinator_mutate_options coordinator_options);
+    result<response_id_type> create_write_response_handler(const std::unordered_map<gms::inet_address, std::optional<mutation>>&, db::write_type type, coordinator_mutate_options coordinator_options);
+    result<response_id_type> create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, shared_ptr<paxos_response_handler>, dht::token>& proposal, db::write_type type, coordinator_mutate_options coordinator_options);
+    result<response_id_type> create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>& meta, db::write_type type, coordinator_mutate_options coordinator_options);
     void register_cdc_operation_result_tracker(const storage_proxy::unique_response_handler_vector& ids, lw_shared_ptr<cdc::operation_result_tracker> tracker);
     void send_to_live_endpoints(response_id_type response_id, clock_type::time_point timeout);
     template<typename Range>
@@ -380,9 +396,9 @@ private:
         db::consistency_level cl,
         coordinator_query_options optional_params);
     template<typename Range, typename CreateWriteHandler>
-    future<result<unique_response_handler_vector>> mutate_prepare(Range&& mutations, db::consistency_level cl, db::write_type type, service_permit permit, CreateWriteHandler handler);
+    future<result<unique_response_handler_vector>> mutate_prepare(Range&& mutations, db::write_type type, coordinator_mutate_options coordinator_options, CreateWriteHandler handler);
     template<typename Range>
-    future<result<unique_response_handler_vector>> mutate_prepare(Range&& mutations, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
+    future<result<unique_response_handler_vector>> mutate_prepare(Range&& mutations, db::write_type type, coordinator_mutate_options coordinator_options);
     future<result<>> mutate_begin(unique_response_handler_vector ids, db::consistency_level cl, tracing::trace_state_ptr trace_state, std::optional<clock_type::time_point> timeout_opt = { });
     future<result<>> mutate_end(future<result<>> mutate_result, utils::latency_counter, write_stats& stats, tracing::trace_state_ptr trace_state);
     future<result<>> schedule_repair(std::unordered_map<dht::token, std::unordered_map<gms::inet_address, std::optional<mutation>>> diffs, db::consistency_level cl, tracing::trace_state_ptr trace_state, service_permit permit);
@@ -390,7 +406,7 @@ private:
     void unthrottle();
     void handle_read_error(std::variant<exceptions::coordinator_exception_container, std::exception_ptr> failure, bool range);
     template<typename Range>
-    future<result<>> mutate_internal(Range mutations, db::consistency_level cl, bool counter_write, tracing::trace_state_ptr tr_state, service_permit permit, std::optional<clock_type::time_point> timeout_opt = { }, lw_shared_ptr<cdc::operation_result_tracker> cdc_tracker = { }, db::allow_per_partition_rate_limit allow_limit = db::allow_per_partition_rate_limit::no);
+    future<result<>> mutate_internal(Range mutations, bool counter_write, coordinator_mutate_options coordinator_options, std::optional<clock_type::time_point> timeout_opt = { }, lw_shared_ptr<cdc::operation_result_tracker> cdc_tracker = { });
     future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_nonsingular_mutations_locally(
             schema_ptr s, lw_shared_ptr<query::read_command> cmd, const dht::partition_range_vector&& pr, tracing::trace_state_ptr trace_state,
             clock_type::time_point timeout);
@@ -398,14 +414,12 @@ private:
             schema_ptr s, lw_shared_ptr<query::read_command> cmd, const dht::partition_range_vector&& pr, query::result_options opts,
             tracing::trace_state_ptr trace_state, clock_type::time_point timeout);
 
-    future<> mutate_counters_on_leader(std::vector<frozen_mutation_and_schema> mutations, db::consistency_level cl, clock_type::time_point timeout,
-                                       tracing::trace_state_ptr trace_state, service_permit permit);
-    future<> mutate_counter_on_leader_and_replicate(const schema_ptr& s, frozen_mutation m, db::consistency_level cl, clock_type::time_point timeout,
-                                                    tracing::trace_state_ptr trace_state, service_permit permit);
+    future<> mutate_counters_on_leader(std::vector<frozen_mutation_and_schema> mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout);
+    future<> mutate_counter_on_leader_and_replicate(const schema_ptr& s, frozen_mutation m, coordinator_mutate_options coordinator_options, clock_type::time_point timeout);
 
     gms::inet_address find_leader_for_counter_update(const mutation& m, db::consistency_level cl);
 
-    future<result<>> do_mutate(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit, bool, db::allow_per_partition_rate_limit allow_limit, lw_shared_ptr<cdc::operation_result_tracker> cdc_tracker);
+    future<result<>> do_mutate(std::vector<mutation> mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout, bool, lw_shared_ptr<cdc::operation_result_tracker> cdc_tracker);
 
     future<> send_to_endpoint(
             std::unique_ptr<mutation_holder> m,
@@ -423,7 +437,7 @@ private:
     db::view::update_backlog get_backlog_of(gms::inet_address) const;
 
     template<typename Range>
-    future<> mutate_counters(Range&& mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state, service_permit permit, clock_type::time_point timeout);
+    future<> mutate_counters(Range&& mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout);
 
     void retire_view_response_handlers(noncopyable_function<bool(const abstract_write_response_handler&)> filter_fun);
     void connection_dropped(gms::inet_address);
@@ -538,6 +552,8 @@ public:
     * @param consistency_level the consistency level for the operation
     * @param tr_state trace state handle
     */
+    future<> mutate(std::vector<mutation> mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout, bool raw_counters = false);
+
     future<> mutate(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit, bool raw_counters = false);
 
     /**
@@ -545,17 +561,15 @@ public:
     * through the result<>, which allows for efficient inspection
     * of the exception on the exception handling path.
     */
-    future<result<>> mutate_result(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit, bool raw_counters = false);
+    future<result<>> mutate_result(std::vector<mutation> mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout, bool raw_counters = false);
 
     paxos_participants
     get_paxos_participants(const sstring& ks_name, const dht::token& token, db::consistency_level consistency_for_paxos);
 
-    future<> replicate_counter_from_leader(mutation m, db::consistency_level cl, tracing::trace_state_ptr tr_state,
-                                           clock_type::time_point timeout, service_permit permit);
+    future<> replicate_counter_from_leader(mutation m, coordinator_mutate_options coordinator_options, clock_type::time_point timeout);
 
-    future<result<>> mutate_with_triggers(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout,
-                                          bool should_mutate_atomically, tracing::trace_state_ptr tr_state, service_permit permit,
-                                          db::allow_per_partition_rate_limit allow_limit, bool raw_counters = false);
+    future<result<>> mutate_with_triggers(std::vector<mutation> mutations, coordinator_mutate_options coordinator_options,
+                                          clock_type::time_point timeout, bool should_mutate_atomically, bool raw_counters = false);
 
     /**
     * See mutate. Adds additional steps before and after writing a batch.
@@ -567,6 +581,8 @@ public:
     * @param consistency_level the consistency level for the operation
     * @param tr_state trace state handle
     */
+    future<> mutate_atomically(std::vector<mutation> mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout);
+
     future<> mutate_atomically(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit);
 
     /**
@@ -574,7 +590,7 @@ public:
     * through the result<>, which allows for efficient inspection
     * of the exception on the exception handling path.
     */
-    future<result<>> mutate_atomically_result(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit);
+    future<result<>> mutate_atomically_result(std::vector<mutation> mutations, coordinator_mutate_options coordinator_options, clock_type::time_point timeout);
 
     future<> send_hint_to_all_replicas(frozen_mutation_and_schema fm_a_s);
 
