@@ -318,7 +318,7 @@ future<coordinator_result<>> batch_statement::execute_without_conditions(
         }
     }
     return qp.proxy().mutate_with_triggers(std::move(mutations),
-            service::storage_proxy::coordinator_mutate_options(std::move(permit), cl, db::allow_per_partition_rate_limit::no, std::move(tr_state)), timeout, mutate_atomic);
+            make_lw_shared<service::storage_proxy::coordinator_mutate_options>(std::move(permit), cl, db::allow_per_partition_rate_limit::no, std::move(tr_state)), timeout, mutate_atomic);
 }
 
 future<shared_ptr<cql_transport::messages::result_message>> batch_statement::execute_with_conditions(
