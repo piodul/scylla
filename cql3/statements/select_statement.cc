@@ -43,6 +43,8 @@
 #include "utils/result_combinators.hh"
 #include "utils/result_loop.hh"
 
+logging::logger my_debug_logger("statement");
+
 template<typename T = void>
 using coordinator_result = cql3::statements::select_statement::coordinator_result<T>;
 
@@ -1087,6 +1089,10 @@ indexed_table_select_statement::do_execute(query_processor& qp,
         }
     }
 
+    // Indexes on static columns do not contain the original table's clustering key.
+    // TODO: Should this be cached somehow?
+    const bool static_column_index = _schema->get_column_definition(to_bytes(_index.target_column()))->is_static();
+
     // Aggregated and paged filtering needs to aggregate the results from all pages
     // in order to avoid returning partial per-page results (issue #4540).
     // It's a little bit more complicated than regular aggregation, because each paging state
@@ -1098,10 +1104,10 @@ indexed_table_select_statement::do_execute(query_processor& qp,
     const bool aggregate = _selection->is_aggregate() || has_group_by();
     if (aggregate) {
         return do_with(cql3::selection::result_set_builder(*_selection, now, options.get_cql_serialization_format(), *_group_by_cell_indices), std::make_unique<cql3::query_options>(cql3::query_options(options)),
-                [this, &options, &qp, &state, now, whole_partitions, partition_slices] (cql3::selection::result_set_builder& builder, std::unique_ptr<cql3::query_options>& internal_options) {
+                [this, &options, &qp, &state, now, whole_partitions, partition_slices, static_column_index] (cql3::selection::result_set_builder& builder, std::unique_ptr<cql3::query_options>& internal_options) {
             // page size is set to the internal count page size, regardless of the user-provided value
             internal_options.reset(new cql3::query_options(std::move(internal_options), options.get_paging_state(), internal_paging_size));
-            return utils::result_repeat([this, &builder, &options, &internal_options, &qp, &state, now, whole_partitions, partition_slices] () {
+            return utils::result_repeat([this, &builder, &options, &internal_options, &qp, &state, now, whole_partitions, partition_slices, static_column_index] () {
                 auto consume_results = [this, &builder, &options, &internal_options, &state] (foreign_ptr<lw_shared_ptr<query::result>> results, lw_shared_ptr<query::read_command> cmd, lw_shared_ptr<const service::pager::paging_state> paging_state) -> coordinator_result<stop_iteration> {
                     if (paging_state) {
                         paging_state = generate_view_paging_state_from_base_query_results(paging_state, results, state, options);
@@ -1118,7 +1124,7 @@ indexed_table_select_statement::do_execute(query_processor& qp,
                     return stop_iteration(!has_more_pages);
                 };
 
-                if (whole_partitions || partition_slices) {
+                if (whole_partitions || partition_slices || static_column_index) {
                     tracing::trace(state.get_trace_state(), "Consulting index {} for a single slice of keys, aggregation query", _index.metadata().name());
                     return find_index_partition_ranges(qp, state, *internal_options).then(utils::result_wrap_unpack(
                             [this, now, &state, &internal_options, &qp, consume_results = std::move(consume_results)] (dht::partition_range_vector partition_ranges, lw_shared_ptr<const service::pager::paging_state> paging_state) {
@@ -1147,7 +1153,7 @@ indexed_table_select_statement::do_execute(query_processor& qp,
         });
     }
 
-    if (whole_partitions || partition_slices) {
+    if (whole_partitions || partition_slices || static_column_index) {
         tracing::trace(state.get_trace_state(), "Consulting index {} for a single slice of keys", _index.metadata().name());
         // In this case, can use our normal query machinery, which retrieves
         // entire partitions or the same slice for many partitions.
@@ -1192,6 +1198,8 @@ dht::partition_range_vector indexed_table_select_statement::get_partition_ranges
 query::partition_slice indexed_table_select_statement::get_partition_slice_for_global_index_posting_list(const query_options& options) const {
     partition_slice_builder partition_slice_builder{*_view_schema};
 
+    my_debug_logger.info("Global posting list, view schema: {}", _view_schema);
+
     if (!_restrictions->has_partition_key_unrestricted_components()) {
         bool pk_restrictions_is_single = !has_token(_restrictions->get_partition_key_restrictions());
         // Only EQ restrictions on base partition key can be used in an index view query
@@ -1210,6 +1218,8 @@ query::partition_slice indexed_table_select_statement::get_partition_slice_for_g
 
 query::partition_slice indexed_table_select_statement::get_partition_slice_for_local_index_posting_list(const query_options& options) const {
     partition_slice_builder partition_slice_builder{*_view_schema};
+
+    my_debug_logger.info("Local posting list");
 
     partition_slice_builder.with_ranges(
         _restrictions->get_local_index_clustering_ranges(options, *_view_schema));
@@ -1231,6 +1241,9 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
 {
     dht::partition_range_vector partition_ranges = _get_partition_ranges_for_posting_list(options);
     auto partition_slice = _get_partition_slice_for_posting_list(options);
+
+    my_debug_logger.info("Partition ranges: {}", partition_ranges);
+    my_debug_logger.info("Partition slice: {}", partition_slice);
 
     auto cmd = ::make_lw_shared<query::read_command>(
             _view_schema->id(),
@@ -1256,6 +1269,8 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
     }
     auto selection = selection::selection::for_columns(_view_schema, columns);
 
+    my_debug_logger.info("Column definitions: {}", columns);
+
     int32_t page_size = options.get_page_size();
     if (page_size <= 0 || !service::pager::query_pagers::may_need_paging(*_view_schema, page_size, *cmd, partition_ranges)) {
         return qp.proxy().query_result(_view_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()})
@@ -1265,7 +1280,9 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
             query::result_view::consume(*qr.query_result,
                                         std::move(partition_slice),
                                         cql3::selection::result_set_builder::visitor(builder, *_view_schema, *selection));
-            return ::make_shared<cql_transport::messages::result_message::rows>(result(builder.build()));
+            auto rows = ::make_shared<cql_transport::messages::result_message::rows>(result(builder.build()));
+            my_debug_logger.info("read_posting_list: {}", *rows);
+            return std::move(rows);
         }));
     }
 
@@ -1274,7 +1291,9 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
     return p->fetch_page_result(options.get_page_size(), now, timeout).then(utils::result_wrap([p = std::move(p), &options, limit, now] (std::unique_ptr<cql3::result_set> rs)
             -> coordinator_result<::shared_ptr<cql_transport::messages::result_message::rows>> {
         rs->get_metadata().set_paging_state(p->state());
-        return ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
+        auto rows = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
+        my_debug_logger.info("read_posting_list: {}", *rows);
+        return std::move(rows);
     }));
 }
 
@@ -1288,6 +1307,9 @@ indexed_table_select_statement::find_index_partition_ranges(query_processor& qp,
     using value_type = std::tuple<dht::partition_range_vector, lw_shared_ptr<const service::pager::paging_state>>;
     auto now = gc_clock::now();
     auto timeout = db::timeout_clock::now() + get_timeout(state.get_client_state(), options);
+
+    my_debug_logger.info("calling find_index_partition_ranges");
+
     return read_posting_list(qp, options, get_limit(options), state, now, timeout, false).then(utils::result_wrap(
             [this, now, &options] (::shared_ptr<cql_transport::messages::result_message::rows> rows) {
         auto rs = cql3::untyped_result_set(rows);
@@ -1329,6 +1351,9 @@ indexed_table_select_statement::find_index_clustering_rows(query_processor& qp, 
     using value_type = std::tuple<std::vector<indexed_table_select_statement::primary_key>, lw_shared_ptr<const service::pager::paging_state>>;
     auto now = gc_clock::now();
     auto timeout = db::timeout_clock::now() + get_timeout(state.get_client_state(), options);
+
+    my_debug_logger.info("calling find_index_clustering_rows");
+
     return read_posting_list(qp, options, get_limit(options), state, now, timeout, true).then(utils::result_wrap(
             [this, now, &options] (::shared_ptr<cql_transport::messages::result_message::rows> rows) {
 

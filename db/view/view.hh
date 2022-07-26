@@ -41,13 +41,15 @@ private:
     schema_ptr _base_schema;
     // Id of a regular base table column included in the view's PK, if any.
     // Scylla views only allow one such column, alternator can have up to two.
-    std::vector<column_id> _base_non_pk_columns_in_view_pk;
+    std::vector<column_id> _base_regular_columns_in_view_pk;
+    std::vector<column_id> _base_static_columns_in_view_pk;
     // For tracing purposes, if the view is out of sync with its base table
     // and there exists a column which is not in base, its name is stored
     // and added to debug messages.
     std::optional<bytes> _column_missing_in_base = {};
 public:
-    const std::vector<column_id>& base_non_pk_columns_in_view_pk() const;
+    const std::vector<column_id>& base_regular_columns_in_view_pk() const;
+    const std::vector<column_id>& base_static_columns_in_view_pk() const;
     const schema_ptr& base_schema() const;
 
     // Indicates if the view hase pk columns which are not part of the base
@@ -62,7 +64,9 @@ public:
     const bool use_only_for_reads;
 
     // A constructor for a base info that can facilitate reads and writes from the materialized view.
-    base_dependent_view_info(schema_ptr base_schema, std::vector<column_id>&& base_non_pk_columns_in_view_pk);
+    base_dependent_view_info(schema_ptr base_schema,
+            std::vector<column_id>&& base_regular_columns_in_view_pk,
+            std::vector<column_id>&& base_static_columns_in_view_pk);
     // A constructor for a base info that can facilitate only reads from the materialized view.
     base_dependent_view_info(bool has_base_non_pk_columns_in_view_pk, std::optional<bytes>&& column_missing_in_base);
 };
@@ -120,6 +124,7 @@ bool may_be_affected_by(const schema& base, const view_info& view, const dht::de
  * @return whether the base row matches the view filter.
  */
 bool matches_view_filter(const schema& base, const view_info& view, const partition_key& key, const clustering_row& update, gc_clock::time_point now);
+bool matches_view_filter(const schema& base, const view_info& view, const partition_key& key, const static_row& update, gc_clock::time_point now);
 
 bool clustering_prefix_matches(const schema& base, const partition_key& key, const clustering_key_prefix& ck);
 
@@ -142,22 +147,37 @@ public:
     future<> move_to(utils::chunked_vector<frozen_mutation_and_schema>& mutations);
 
     void generate_update(const partition_key& base_key, const clustering_row& update, const std::optional<clustering_row>& existing, gc_clock::time_point now);
+    void generate_update(const partition_key& base_key, const static_row& update, const std::optional<static_row>& existing, gc_clock::time_point now);
 
     size_t op_count() const;
 
 private:
     mutation_partition& partition_for(partition_key&& key);
     row_marker compute_row_marker(const clustering_row& base_row) const;
-    deletable_row& get_view_row(const partition_key& base_key, const clustering_row& update);
-    bool can_skip_view_updates(const clustering_row& update, const clustering_row& existing) const;
+    row_marker compute_row_marker(const static_row& base_row) const;
+    template<ClusteringOrStaticRow Fragment>
+    deletable_row& get_view_row(const partition_key& base_key, const Fragment& update);
+    template<ClusteringOrStaticRow Fragment>
+    bool can_skip_view_updates(const Fragment& update, const Fragment& existing) const;
     void create_entry(const partition_key& base_key, const clustering_row& update, gc_clock::time_point now);
+    void create_entry(const partition_key& base_key, const static_row& update, gc_clock::time_point now);
     void delete_old_entry(const partition_key& base_key, const clustering_row& existing, const clustering_row& update, gc_clock::time_point now);
+    void delete_old_entry(const partition_key& base_key, const static_row& existing, const static_row& update, gc_clock::time_point now);
     void do_delete_old_entry(const partition_key& base_key, const clustering_row& existing, const clustering_row& update, gc_clock::time_point now);
+    void do_delete_old_entry(const partition_key& base_key, const static_row& existing, const static_row& update, gc_clock::time_point now);
     void update_entry(const partition_key& base_key, const clustering_row& update, const clustering_row& existing, gc_clock::time_point now);
+    void update_entry(const partition_key& base_key, const static_row& update, const static_row& existing, gc_clock::time_point now);
     void replace_entry(const partition_key& base_key, const clustering_row& update, const clustering_row& existing, gc_clock::time_point now) {
         create_entry(base_key, update, now);
         delete_old_entry(base_key, existing, update, now);
     }
+    void replace_entry(const partition_key& base_key, const static_row& update, const static_row& existing, gc_clock::time_point now) {
+        create_entry(base_key, update, now);
+        delete_old_entry(base_key, existing, update, now);
+    }
+
+    template<ClusteringOrStaticRow Fragment>
+    void do_generate_update(const partition_key& base_key, const Fragment& update, const std::optional<Fragment>& existing, gc_clock::time_point now);
 };
 
 class view_update_builder {
@@ -194,6 +214,7 @@ public:
 
 private:
     void generate_update(clustering_row&& update, std::optional<clustering_row>&& existing);
+    void generate_update(static_row&& update, std::optional<static_row>&& existing);
     future<stop_iteration> on_results();
 
     future<stop_iteration> advance_all();

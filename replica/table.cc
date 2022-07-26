@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+#include <algorithm>
+#include <boost/algorithm/string/predicate.hpp>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
@@ -2302,18 +2304,30 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(schema_ptr s
         co_return row_locker::lock_holder();
     }
     auto cr_ranges = co_await db::view::calculate_affected_clustering_ranges(*base, m.decorated_key(), m.partition(), views);
-    if (cr_ranges.empty()) {
+    const bool need_regular = !cr_ranges.empty();
+    const bool need_static = !m.partition().static_row().empty()
+            && std::ranges::any_of(views, [] (const db::view::view_and_base& vab) { return !vab.base->base_static_columns_in_view_pk().empty(); });
+    if (!need_regular && !need_static) {
+        tlogger.info("View updates do not require read-before-write");
         tracing::trace(tr_state, "View updates do not require read-before-write");
         co_await generate_and_propagate_view_updates(base, sem.make_tracking_only_permit(s.get(), "push-view-updates-1", timeout), std::move(views), std::move(m), { }, std::move(tr_state), now);
         // In this case we are not doing a read-before-write, just a
         // write, so no lock is needed.
         co_return row_locker::lock_holder();
     }
-    // We read the whole set of regular columns in case the update now causes a base row to pass
+
+    tlogger.info("View updates DO require read-before-write");
+
+    // We read the whole set of regular and static columns in case the update now causes a base row to pass
     // a view's filters, and a view happens to include columns that have no value in this update.
     // Also, one of those columns can determine the lifetime of the base row, if it has a TTL.
-    auto columns = boost::copy_range<query::column_id_vector>(
-            base->regular_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)));
+    query::column_id_vector columns;
+    if (need_regular) {
+        boost::copy(base->regular_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)), std::back_inserter(columns));
+    }
+    if (need_static) {
+        boost::copy(base->static_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)), std::back_inserter(columns));
+    }
     query::partition_slice::option_set opts;
     opts.set(query::partition_slice::option::send_partition_key);
     opts.set(query::partition_slice::option::send_clustering_key);

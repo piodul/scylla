@@ -182,6 +182,10 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const printer& p);
 };
 
+template<typename Fragment>
+concept ClusteringOrStaticRow =
+    std::same_as<clustering_row, Fragment> || std::same_as<static_row, Fragment>;
+
 class partition_start final {
     dht::decorated_key _key;
     tombstone _partition_tombstone;

@@ -15,6 +15,7 @@
 #include "cql3/expr/expression.hh"
 #include "index/target_parser.hh"
 #include "db/query_context.hh"
+#include "log.hh"
 #include "schema_builder.hh"
 #include "replica/database.hh"
 #include "db/view/view.hh"
@@ -22,6 +23,8 @@
 #include <boost/range/adaptor/map.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+
+extern logging::logger my_debug_logger;
 
 namespace secondary_index {
 
@@ -129,11 +132,13 @@ view_ptr secondary_index_manager::create_view_for_index(const index_metadata& im
         }
     }
 
+    if (!index_target->is_static()) {
     for (auto& col : schema->clustering_key_columns()) {
         if (col == *index_target) {
             continue;
         }
         builder.with_column(col.name(), col.type, column_kind::clustering_key);
+    }
     }
     if (index_target->is_primary_key()) {
         for (auto& def : schema->regular_columns()) {

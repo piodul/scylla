@@ -13,6 +13,7 @@
 class schema;
 class partition_key;
 class clustering_row;
+class static_row;
 
 class column_computation;
 using column_computation_ptr = std::unique_ptr<column_computation>;
@@ -37,6 +38,7 @@ public:
 
     virtual bytes serialize() const = 0;
     virtual bytes_opt compute_value(const schema& schema, const partition_key& key, const clustering_row& row) const = 0;
+    virtual bytes_opt compute_value(const schema& schema, const partition_key& key, const static_row& row) const = 0;
 };
 
 /*
@@ -55,6 +57,7 @@ public:
     }
     virtual bytes serialize() const override;
     virtual bytes_opt compute_value(const schema& schema, const partition_key& key, const clustering_row& row) const override;
+    virtual bytes_opt compute_value(const schema& schema, const partition_key& key, const static_row& row) const override;
 };
 
 
@@ -76,4 +79,5 @@ public:
     }
     virtual bytes serialize() const override;
     virtual bytes_opt compute_value(const schema& schema, const partition_key& key, const clustering_row& row) const override;
+    virtual bytes_opt compute_value(const schema& schema, const partition_key& key, const static_row& row) const override;
 };

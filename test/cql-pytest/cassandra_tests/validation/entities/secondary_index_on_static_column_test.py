@@ -108,7 +108,7 @@ def testIndexOnCollections(cql, test_keyspace):
         execute(cql, table, "DELETE m['a'] FROM %s WHERE k = 0")
         assert_empty(execute(cql, table, "SELECT k, v FROM %s  WHERE m CONTAINS KEY 'a'"))
 
-@pytest.mark.xfail(reason="issues #2963")
+# @pytest.mark.xfail(reason="issues #2963")
 def testIndexOnFrozenCollections(cql, test_keyspace):
     with create_table(cql, test_keyspace, "(k int, v int, l frozen<list<int>> static, s frozen<set<text>> static, m frozen<map<text, int>> static, PRIMARY KEY (k, v))") as table:
         execute(cql, table, "CREATE INDEX ON %s (FULL(l))")

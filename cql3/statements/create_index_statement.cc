@@ -29,6 +29,8 @@
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/algorithm/string/join.hpp>
 
+extern logging::logger my_debug_logger;
+
 namespace cql3 {
 
 namespace statements {
@@ -102,9 +104,9 @@ std::vector<::shared_ptr<index_target>> create_index_statement::validate_while_e
         }
 
         //NOTICE(sarna): Should be lifted after resolving issue #2963
-        if (cd->is_static()) {
-            throw exceptions::invalid_request_exception("Indexing static columns is not implemented yet.");
-        }
+        // if (cd->is_static()) {
+        //     throw exceptions::invalid_request_exception("Indexing static columns is not implemented yet.");
+        // }
 
         if (cd->type->references_duration()) {
             using request_validations::check_false;
@@ -299,6 +301,8 @@ future<std::pair<::shared_ptr<cql_transport::event::schema_change>, std::vector<
 create_index_statement::prepare_schema_mutations(query_processor& qp, api::timestamp_type ts) const {
     using namespace cql_transport;
     auto schema = build_index_schema(qp);
+
+    // my_debug_logger.info("Index schema is: {}", *schema);
 
     ::shared_ptr<event::schema_change> ret;
     std::vector<mutation> m;

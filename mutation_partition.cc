@@ -1673,6 +1673,7 @@ static bool dead_marker_shadows_row(const schema& s, column_kind kind, const row
             && s.view_info()->has_base_non_pk_columns_in_view_pk()
             && !marker.is_live()
             && kind == column_kind::regular_column; // not applicable to static rows
+            // TODO: Does this need fixing?
 }
 
 bool row::compact_and_expire(
