@@ -24,8 +24,12 @@
 static logging::logger wasm_logger("wasm");
 
 namespace wasm {
-
-context::context(wasmtime::Engine& engine_ptr, std::string name, instance_cache* cache) : engine_ptr(engine_ptr), function_name(name), cache(cache) {
+context::context(wasmtime::Engine& engine_ptr, std::string name, instance_cache* cache, uint64_t yield_fuel, uint64_t total_fuel)
+    : engine_ptr(engine_ptr)
+    , function_name(name)
+    , cache(cache)
+    , yield_fuel(yield_fuel)
+    , total_fuel(total_fuel) {
 }
 
 static constexpr size_t WASM_PAGE_SIZE = 64 * 1024;
@@ -209,7 +213,7 @@ struct from_val_visitor {
 void compile(context& ctx, const std::vector<sstring>& arg_names, std::string script) {
     try {
         ctx.module = wasmtime::create_module(ctx.engine_ptr, rust::Str(script.data(), script.size()));
-        auto store = wasmtime::create_store(ctx.engine_ptr);
+        auto store = wasmtime::create_store(ctx.engine_ptr, ctx.total_fuel, ctx.yield_fuel);
         auto inst = create_instance(ctx.engine_ptr, **ctx.module, *store);
         create_func(*inst, *store, ctx.function_name);
     } catch (const rust::Error& e) {
