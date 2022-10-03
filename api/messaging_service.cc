@@ -13,6 +13,9 @@
 #include <iostream>
 #include <sstream>
 
+#include "rust_task.hh"
+#include "seastar/json/json_elements.hh"
+
 using namespace httpd::messaging_service_json;
 using namespace netw;
 
@@ -111,7 +114,20 @@ void set_messaging_service(http_context& ctx, routes& r, sharded<netw::messaging
     }));
 
     get_version.set(r, [&ms](const_req req) {
-        return ms.local().get_raw_version(req.get_query_param("addr"));
+        auto* t = new rust::RustTask();
+        future<uint32_t> f = t->get_future();
+        seastar::schedule(t);
+
+        (void)f.then([] (uint32_t x) {
+            printf("DUPA: %d\n", x);
+        });
+
+        return json::json_return_type(123);
+
+        // return f.then([&ms, req = std::move(req)] (uint32_t x) mutable {
+        //     printf("Number: %d\n", (int)x);
+        //     return make_ready_future<json::json_return_type>(json::json_return_type(ms.local().get_raw_version(req.get_query_param("addr"))));
+        // });
     });
 
     get_dropped_messages_by_ver.set(r, [&ms](std::unique_ptr<request> req) {

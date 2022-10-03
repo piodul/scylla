@@ -941,6 +941,7 @@ scylla_core = (['message/messaging_service.cc',
                 'unimplemented.cc',
                 'query.cc',
                 'query-result-set.cc',
+                'rust_task.cc',
                 'locator/abstract_replication_strategy.cc',
                 'locator/azure_snitch.cc',
                 'locator/simple_strategy.cc',
@@ -1048,6 +1049,7 @@ scylla_core = (['message/messaging_service.cc',
                 'service/broadcast_tables/experimental/lang.cc',
                 'tasks/task_manager.cc',
                 'rust/wasmtime_bindings/src/lib.rs',
+                'rust/inc/src/lib.rs',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
                )
