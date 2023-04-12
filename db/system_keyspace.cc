@@ -260,6 +260,7 @@ schema_ptr system_keyspace::topology() {
             .with_column("transition_state", utf8_type, column_kind::static_column)
             .with_column("current_cdc_generation_uuid", uuid_type, column_kind::static_column)
             .with_column("current_cdc_generation_timestamp", timestamp_type, column_kind::static_column)
+            .with_column("supported_features", utf8_type)
             .set_comment("Current state of topology change machine")
             .with_version(generate_schema_version(id))
             .build();
