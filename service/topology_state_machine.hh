@@ -83,14 +83,25 @@ struct topology {
     // operation untill the node becomes normal
     std::unordered_map<raft::server_id, request_param> req_param;
 
+    // Supported features, for non-left nodes
+    std::unordered_map<raft::server_id, std::set<sstring>> features;
+
     // Find only nodes in non 'left' state
     const std::pair<const raft::server_id, replica_state>* find(raft::server_id id);
     // Return true if node exists in any state including 'left' one
     bool contains(raft::server_id id);
+
+    // Returns true if the topology state contains information about features
+    // of all nodes in the cluster. It will return false until management
+    // of features is fully migrated to raft.
+    bool has_complete_feature_information() const noexcept;
+
+    std::set<sstring> calculate_enabled_features(std::optional<raft::server_id> node_to_skip = {});
 };
 
 struct raft_topology_snapshot {
     std::vector<canonical_mutation> mutations;
+    std::vector<sstring> enabled_features;
 };
 
 struct raft_topology_pull_params {

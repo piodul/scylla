@@ -244,6 +244,7 @@ schema_ptr system_keyspace::topology() {
             .with_column("replaced_id", uuid_type)
             .with_column("rebuild_option", utf8_type)
             .with_column("num_tokens", int32_type)
+            .with_column("supported_features", utf8_type) // Comma-separated list
             .set_comment("Current state of topology change machine")
             .with_version(generate_schema_version(id))
             .build();
@@ -3281,7 +3282,7 @@ future<std::set<sstring>> system_keyspace::load_local_enabled_features() {
 }
 
 future<> system_keyspace::save_local_enabled_features(std::set<sstring> features) {
-    auto features_str = fmt::to_string(fmt::join(features, ","));
+    auto features_str = gms::feature_service::from_feature_set(features);
     co_await set_scylla_local_param(gms::feature_service::ENABLED_FEATURES_KEY, features_str);
 }
 
@@ -3562,6 +3563,11 @@ future<service::topology_state_machine::topology_type> system_keyspace::load_top
         if (map) {
             map->emplace(host_id, service::replica_state{nstate, std::move(datacenter), std::move(rack), std::move(release_version),
                 tstate ? std::optional<service::ring_slice>(service::ring_slice{*tstate, std::move(t)}) : std::nullopt});
+        }
+
+        if (nstate != service::node_state::left && row.has("supported_features")) {
+            auto features = gms::feature_service::to_feature_set(row.get_as<sstring>("supported_features"));
+            ret.features.emplace(host_id, std::move(features));
         }
     }
 

@@ -145,6 +145,13 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
         on_internal_error(slogger, "Expected MIGRATION_REQUEST to return canonical mutations");
     }
 
+    // TODO: We should first:
+    // 1. pull features
+    // 2. enable features
+    // 3. pull topology (may be the same as 1?)
+    // 4. apply topology
+    // 5. pull and apply everything else
+
     auto topology_snp = co_await ser::storage_service_rpc_verbs::send_raft_pull_topology_snapshot(&_mm._messaging, addr, service::raft_topology_pull_params{});
 
     auto history_mut = extract_history_mutation(*cm, _sp.data_dictionary());
@@ -152,6 +159,10 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
     // TODO ensure atomicity of snapshot application in presence of crashes (see TODO in `apply`)
 
     auto read_apply_mutex_holder = co_await get_units(_client._read_apply_mutex, 1);
+
+    const std::set<std::string_view> features_set{topology_snp.enabled_features.begin(), topology_snp.enabled_features.end()};
+    slogger.info("Enabling features obtained from snapshot: {}", features_set);
+    co_await _fs.enable(features_set);
 
     co_await _mm.merge_schema_from(addr, std::move(*cm));
 

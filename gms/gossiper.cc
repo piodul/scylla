@@ -71,14 +71,23 @@ std::chrono::milliseconds gossiper::quarantine_delay() const noexcept {
     return ring_delay * 2;
 }
 
-class feature_enabler : public i_endpoint_state_change_subscriber {
+class feature_enabler : public i_endpoint_state_change_subscriber, public gms::feature::listener {
     gossiper& _g;
+    bool _enabled = true;
 public:
     feature_enabler(gossiper& g) : _g(g) {}
+
+    // i_endpoint_state_change_subscriber methods
     future<> on_join(inet_address ep, endpoint_state state) override {
+        if (!_enabled) {
+            return make_ready_future();
+        }
         return _g.maybe_enable_features();
     }
     future<> on_change(inet_address ep, application_state state, const versioned_value&) override {
+        if (!_enabled) {
+            return make_ready_future();
+        }
         if (state == application_state::SUPPORTED_FEATURES) {
             return _g.maybe_enable_features();
         }
@@ -89,6 +98,15 @@ public:
     future<> on_dead(inet_address, endpoint_state) override { return make_ready_future(); }
     future<> on_remove(inet_address) override { return make_ready_future(); }
     future<> on_restart(inet_address, endpoint_state) override { return make_ready_future(); }
+
+    // gms::feature::listener methods
+    void on_enabled() override {
+        if (_enabled) {
+            _enabled = false;
+            logger.info("Cluster supports managing cluster features through raft group 0. "
+                    "The node will no longer react to features advertised in gossip.");
+        }
+    }
 };
 
 gossiper::gossiper(abort_source& as, feature_service& features, const locator::shared_token_metadata& stm, netw::messaging_service& ms, sharded<db::system_keyspace>& sys_ks, const db::config& cfg, gossip_config gcfg)
@@ -108,7 +126,9 @@ gossiper::gossiper(abort_source& as, feature_service& features, const locator::s
     _scheduled_gossip_task.set_callback(_gcfg.gossip_scheduling_group, [this] { run(); });
     // half of QUARATINE_DELAY, to ensure _just_removed_endpoints has enough leeway to prevent re-gossip
     fat_client_timeout = quarantine_delay() / 2;
-    register_(make_shared<feature_enabler>(*this));
+    auto f_enabler = make_shared<feature_enabler>(*this);
+    features.supports_raft_feature_management.when_enabled(*f_enabler);
+    register_(std::move(f_enabler));
     // Register this instance with JMX
     namespace sm = seastar::metrics;
     auto ep = get_broadcast_address();
@@ -2495,12 +2515,19 @@ std::set<sstring> gossiper::get_supported_features(const std::unordered_map<gms:
     return common_features;
 }
 
-void gossiper::check_knows_remote_features(std::set<std::string_view>& local_features, const std::unordered_map<inet_address, sstring>& loaded_peer_features) const {
+gossiper::features_are_managed_in_gossip gossiper::check_knows_remote_features(std::set<std::string_view>& local_features, const std::unordered_map<inet_address, sstring>& loaded_peer_features) const {
     auto local_endpoint = get_broadcast_address();
     auto common_features = get_supported_features(loaded_peer_features, ignore_features_of_local_node::yes);
+
+    if (common_features.contains(_feature_service.supports_raft_feature_management.name())) {
+        logger.info("Feature check based on gossip is skipped. The cluster manages features in raft. Features will be checked after joining group 0.");
+        return features_are_managed_in_gossip::no;
+    }
+
     if (boost::range::includes(local_features, common_features)) {
         logger.info("Feature check passed. Local node {} features = {}, Remote common_features = {}",
                 local_endpoint, local_features, common_features);
+        return features_are_managed_in_gossip::yes;
     } else {
         throw std::runtime_error(format("Feature check failed. This node can not join the cluster because it does not understand the feature. Local node {} features = {}, Remote common_features = {}", local_endpoint, local_features, common_features));
     }

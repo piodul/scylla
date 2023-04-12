@@ -26,6 +26,7 @@ namespace service {
 
   struct raft_topology_snapshot {
       std::vector<canonical_mutation> mutations;
+      std::vector<sstring> enabled_features [[version 5.3]];
   };
 
   struct raft_topology_pull_params {};

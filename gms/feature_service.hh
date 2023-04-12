@@ -111,12 +111,15 @@ public:
     gms::feature collection_indexing { *this, "COLLECTION_INDEXING"sv };
     gms::feature large_collection_detection { *this, "LARGE_COLLECTION_DETECTION"sv };
     gms::feature secondary_indexes_on_static_columns { *this, "SECONDARY_INDEXES_ON_STATIC_COLUMNS"sv };
+    gms::feature supports_raft_feature_management { *this, "SUPPORTS_RAFT_FEATURE_MANAGEMENT"sv };
 
 public:
 
     const std::unordered_map<sstring, std::reference_wrapper<feature>>& registered_features() const;
 
     static std::set<sstring> to_feature_set(sstring features_string);
+    static sstring from_feature_set(const std::set<sstring>& feature_set);
+    static sstring from_feature_set(const std::set<std::string_view>& feature_set);
     // Persist enabled feature in the `system.scylla_local` table under the "enabled_features" key.
     // The key itself is maintained as an `unordered_set<string>` and serialized via `to_string`
     // function to preserve readability.

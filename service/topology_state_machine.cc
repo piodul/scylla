@@ -8,6 +8,10 @@
  */
 
 #include "topology_state_machine.hh"
+#include <iterator>
+
+
+seastar::logger tlogger("topology_state_maching");
 
 namespace service {
 
@@ -32,6 +36,42 @@ bool topology::contains(raft::server_id id) {
            transition_nodes.contains(id) ||
            new_nodes.contains(id) ||
            left_nodes.contains(id);
+}
+
+bool topology::has_complete_feature_information() const noexcept {
+    return (normal_nodes.size() + transition_nodes.size() + new_nodes.size()) == features.size();
+}
+
+std::set<sstring> topology::calculate_enabled_features(std::optional<raft::server_id> node_to_skip) {
+    if (!has_complete_feature_information()) {
+        throw std::runtime_error("Tried to calculate enabled features based on group 0 state "
+                "which does not have complete information yet");
+    }
+
+    tlogger.info("Computing common set of features for {} nodes", features.size());
+    std::set<sstring> common;
+    bool first = true;
+    for (const auto& [id, node_features] : features) {
+        if (node_to_skip && id == *node_to_skip) {
+            tlogger.info("Skipping node {}", id);
+            continue;
+        }
+        if (first) {
+            tlogger.info("Node {} is first, taking its feature set ({})", id, node_features);
+            common = node_features;
+            first = false;
+        } else {
+            tlogger.info("Node {}'s features: {}, intersecting", id, node_features);
+            std::set<sstring> tmp;
+            std::set_intersection(common.begin(), common.end(),
+                    node_features.begin(), node_features.end(),
+                    std::inserter(tmp, tmp.end()));
+            common = std::move(tmp);
+        }
+    }
+
+    tlogger.info("Common features: {}", common);
+    return common;
 }
 
 static std::unordered_map<ring_slice::replication_state, sstring> replication_state_to_name_map = {

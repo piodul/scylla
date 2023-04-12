@@ -764,6 +764,8 @@ private:
 
     friend class group0_state_machine;
     bool _raft_topology_change_enabled = false;
+    // Becomes true after the cluster starts managing features in raft
+    bool _raft_cluster_feature_management_switched = false;
     future<> _raft_state_monitor = make_ready_future<>();
     // This fibers monitors raft state and start/stops the topology change
     // coordinator fiber
@@ -788,6 +790,8 @@ private:
     future<> raft_removenode(locator::host_id host_id);
     future<> raft_replace(raft::server&, raft::server_id, gms::inet_address);
     future<> raft_rebuild(sstring source_dc);
+
+    future<> raft_update_supported_features(raft::server& raft_server);
 
     // This is called on all nodes for each new command received through raft
     future<> topology_transition(storage_proxy& proxy, gms::inet_address, std::vector<canonical_mutation>);

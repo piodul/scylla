@@ -178,6 +178,14 @@ std::set<sstring> feature_service::to_feature_set(sstring features_string) {
     return features;
 }
 
+sstring feature_service::from_feature_set(const std::set<sstring>& feature_set) {
+    return fmt::to_string(fmt::join(feature_set, ","));
+}
+
+sstring feature_service::from_feature_set(const std::set<std::string_view>& feature_set) {
+    return fmt::to_string(fmt::join(feature_set, ","));
+}
+
 void feature_service::persist_enabled_feature_info(const gms::feature& f) const {
     // Executed in seastar::async context, because `gms::feature::enable`
     // is only allowed to run within a thread context

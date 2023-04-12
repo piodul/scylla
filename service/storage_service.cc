@@ -11,6 +11,7 @@
 
 #include "storage_service.hh"
 #include "dht/boot_strapper.hh"
+#include <boost/range/algorithm/set_algorithm.hpp>
 #include <seastar/core/distributed.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/coroutine/as_future.hh>
@@ -132,6 +133,10 @@ storage_service::storage_service(abort_source& abort_source,
     if (_snitch.local_is_initialized()) {
         _listeners.emplace_back(make_lw_shared(_snitch.local()->when_reconfigured(_snitch_reconfigure)));
     }
+
+    _listeners.push_back(_feature_service.supports_raft_feature_management.when_enabled([this] {
+        _raft_cluster_feature_management_switched = true;
+    }));
 }
 
 enum class node_external_status {
@@ -314,6 +319,22 @@ future<> storage_service::topology_state_load() {
         }
         co_return *ip;
     };
+
+    if (_topology_state_machine._topology.has_complete_feature_information()) {
+        // I'm more and more convinced that we should have a separate struct for all of this...
+        const auto enabled_features = _topology_state_machine._topology.calculate_enabled_features();
+        const auto supported_by_me = _feature_service.supported_feature_set();
+        if (!boost::range::includes(supported_by_me, enabled_features)) {
+            throw std::runtime_error(fmt::format("The node does not understand all features in the cluster, "
+                    "enabled cluster features = {}, "
+                    "local features = {}",
+                    enabled_features,
+                    supported_by_me));
+        }
+        slogger.info("Enabling some features due to topology state reload: {}", enabled_features);
+        std::set<std::string_view> enabled_features_v = boost::copy_range<std::set<std::string_view>>(enabled_features);
+        co_await _feature_service.enable(std::move(enabled_features_v));
+    }
 
     for (const auto& id: _topology_state_machine._topology.left_nodes) {
         auto ip = co_await id2ip(id);
@@ -877,7 +898,8 @@ future<> storage_service::raft_replace(raft::server& raft_server, raft::server_i
                .set("release_version", version::release())
                .set("topology_request", topology_request::replace)
                .set("replaced_id", replaced_id)
-               .set("num_tokens", _db.local().get_config().num_tokens());
+               .set("num_tokens", _db.local().get_config().num_tokens())
+               .set("supported_features", gms::feature_service::from_feature_set(_feature_service.supported_feature_set()));
         topology_change change{{builder.build()}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, fmt::format("replace {}/{}: add myself ({}) to topology", replaced_id, replaced_ip, raft_server.id()));
         try {
@@ -910,13 +932,51 @@ future<> storage_service::raft_bootstrap(raft::server& raft_server) {
                .set("rack", _snitch.local()->get_rack())
                .set("release_version", version::release())
                .set("topology_request", topology_request::join)
-               .set("num_tokens", _db.local().get_config().num_tokens());
+               .set("num_tokens", _db.local().get_config().num_tokens())
+               .set("supported_features", gms::feature_service::from_feature_set(_feature_service.supported_feature_set()));
         topology_change change{{builder.build()}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "bootstrap: add myself to topology");
         try {
             co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), &_abort_source);
         } catch (group0_concurrent_modification&) {
             slogger.info("raft topology: bootstrap: concurrent operation is detected, retrying.");
+        }
+    }
+}
+
+future<> storage_service::raft_update_supported_features(raft::server& raft_server) {
+    // TODO: Can we avoid a read barrier? I don't think we can just check
+    // what's persisted on disk and then skip if it matches our feature set
+    // because something different might be already committed (e.g. we committed
+    // a larger feature set, did not apply it locally but later decided to
+    // roll back). Perhaps we could persist a local flag, outside raft,
+    // which indicates whether the committed state corresponds to our local,
+    // applied state. Each node is responsible for its own features in raft
+    // so this optimization might work.
+
+    co_await raft_server.read_barrier(&_abort_source);
+
+    const auto& state_machine_features = _topology_state_machine._topology.features;
+    const auto features_set_v = _feature_service.supported_feature_set();
+    const std::set<sstring> features_set{features_set_v.begin(), features_set_v.end()};
+
+    while (true) {
+        const auto features_it = state_machine_features.find(raft_server.id());
+        if (features_it != state_machine_features.end() && features_it->second == features_set) {
+            break;
+        }
+
+        const sstring features_string = gms::feature_service::from_feature_set(features_set);
+
+        auto guard = co_await _group0->client().start_operation(&_abort_source);
+        db::system_keyspace::topology_mutation_builder builder(guard.write_timestamp(), raft_server.id());
+        builder.set("supported_features", features_string);
+        topology_change change{{builder.build()}};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "update supported features");
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), &_abort_source);
+        } catch (group0_concurrent_modification&) {
+            slogger.info("raft topology: feature update: concurrent operation is detected, retrying.");
         }
     }
 }
@@ -993,7 +1053,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         auto local_features = _feature_service.supported_feature_set();
         slogger.info("Checking remote features with gossip, initial_contact_nodes={}", initial_contact_nodes);
         co_await _gossiper.do_shadow_round(initial_contact_nodes);
-        _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
+        _raft_cluster_feature_management_switched |= !bool(_gossiper.check_knows_remote_features(local_features, loaded_peer_features));
         _gossiper.check_snitch_name_matches(_snitch.local()->get_name());
         // Check if the node is already removed from the cluster
         auto local_host_id = _db.local().get_config().host_id;
@@ -1139,6 +1199,8 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         } else {
             co_await raft_bootstrap(*raft_server);
         }
+
+        co_await raft_update_supported_features(*raft_server);
 
         // Wait until we enter one of the final states
         co_await _topology_state_machine.event.when([this, raft_server] {
@@ -2311,7 +2373,7 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
         do {
             slogger.info("Checking remote features with gossip");
             _gossiper.do_shadow_round(initial_contact_nodes).get();
-            _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
+            _raft_cluster_feature_management_switched |= !bool(_gossiper.check_knows_remote_features(local_features, loaded_peer_features));
             _gossiper.check_snitch_name_matches(_snitch.local()->get_name());
             auto addr = get_broadcast_address();
             if (!_gossiper.is_safe_for_bootstrap(addr)) {
@@ -2391,7 +2453,7 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
     slogger.info("Checking remote features with gossip");
     co_await _gossiper.do_shadow_round(initial_contact_nodes);
     auto local_features = _feature_service.supported_feature_set();
-    _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
+    _raft_cluster_feature_management_switched |= !bool(_gossiper.check_knows_remote_features(local_features, loaded_peer_features));
 
     // now that we've gossiped at least once, we should be able to find the node we're replacing
     if (replace_host_id) {
@@ -4505,7 +4567,12 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
             boost::range::transform(rs->partitions(), std::back_inserter(results), [s] (const partition& p) {
                 return canonical_mutation{p.mut().unfreeze(s)};
             });
-            co_return raft_topology_snapshot{std::move(results)};
+            std::vector<sstring> enabled_features;
+            if (ss._topology_state_machine._topology.has_complete_feature_information()) {
+                auto enabled_features_set = ss._topology_state_machine._topology.calculate_enabled_features();
+                std::copy(enabled_features_set.begin(), enabled_features_set.end(), std::back_inserter(enabled_features));
+            }
+            co_return raft_topology_snapshot{std::move(results), std::move(enabled_features)};
         });
     });
 }
