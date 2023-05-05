@@ -1273,7 +1273,8 @@ future<> storage_service::raft_replace(raft::server& raft_server, raft::server_i
                .set("replaced_id", replaced_id)
                .set("num_tokens", _db.local().get_config().num_tokens())
                .set("shard_count", smp::count)
-               .set("ignore_msb", _db.local().get_config().murmur3_partitioner_ignore_msb_bits());
+               .set("ignore_msb", _db.local().get_config().murmur3_partitioner_ignore_msb_bits())
+               .set("supported_features", gms::feature_service::from_feature_set(_feature_service.supported_feature_set()));
         topology_change change{{builder.build()}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("replace {}/{}: add myself ({}) to topology", replaced_id, replaced_ip, raft_server.id()));
         try {
@@ -1308,7 +1309,8 @@ future<> storage_service::raft_bootstrap(raft::server& raft_server) {
                .set("topology_request", topology_request::join)
                .set("num_tokens", _db.local().get_config().num_tokens())
                .set("shard_count", smp::count)
-               .set("ignore_msb", _db.local().get_config().murmur3_partitioner_ignore_msb_bits());
+               .set("ignore_msb", _db.local().get_config().murmur3_partitioner_ignore_msb_bits())
+               .set("supported_features", gms::feature_service::from_feature_set(_feature_service.supported_feature_set()));
         topology_change change{{builder.build()}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "bootstrap: add myself to topology");
         try {
@@ -1324,6 +1326,7 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
     auto local_shard_count = smp::count;
     auto local_ignore_msb = _db.local().get_config().murmur3_partitioner_ignore_msb_bits();
     auto local_release_version = version::release();
+    auto local_supported_features = boost::copy_range<std::set<sstring>>(_feature_service.supported_feature_set());
 
     auto synchronized = [&] () {
         auto it = _topology_state_machine._topology.find(raft_server.id());
@@ -1335,7 +1338,8 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
 
         return replica_state.shard_count == local_shard_count
             && replica_state.ignore_msb == local_ignore_msb
-            && replica_state.release_version == local_release_version;
+            && replica_state.release_version == local_release_version
+            && replica_state.supported_features == local_supported_features;
     };
 
     // We avoid performing a read barrier if we're sure that our metadata stored in topology
@@ -1370,7 +1374,8 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
         topology_mutation_builder builder(guard.write_timestamp(), raft_server.id());
         builder.set("shard_count", local_shard_count)
                .set("ignore_msb", local_ignore_msb)
-               .set("release_version", local_release_version);
+               .set("release_version", local_release_version)
+               .set("supported_features", gms::feature_service::from_feature_set(local_supported_features));
         topology_change change{{builder.build()}};
         group0_command g0_cmd = _group0->client().prepare_command(
                 std::move(change), guard, ::format("{}: update topology with local metadata", raft_server.id()));
