@@ -80,6 +80,32 @@ async def wait_for_cql_and_get_hosts(cql: Session, servers: list[ServerInfo], de
 
     return hosts
 
+
+async def wait_for_feature(feature: str, cql: Session, hosts: list[Host], deadline: float) -> None:
+    """Wait until given feature is enabled on given node."""
+    async def feature_enabled(host):
+        enabled_features = await get_enabled_features(cql, host)
+        if feature in enabled_features:
+            logging.info(f"Cluster feature {feature} is enabled on {host}")
+            return True
+        else:
+            logging.info(f"Cluster feature {feature} is not yet enabled on {host}")
+            return False
+    await asyncio.gather(*(wait_for(lambda: feature_enabled(host), deadline) for host in hosts))
+
+
+async def get_supported_features(cql: Session, host: Host) -> set[str]:
+    """Returns a set of cluster features that a node advertises support for."""
+    rs = await cql.run_async(f"SELECT supported_features FROM system.local WHERE key = 'local'", host=host)
+    return set(rs[0].supported_features.split(","))
+
+
+async def get_enabled_features(cql: Session, host: Host) -> set[str]:
+    """Returns a set of cluster features that a node considers to be enabled."""
+    rs = await cql.run_async(f"SELECT value FROM system.scylla_local WHERE key = 'enabled_features'", host=host)
+    return set(rs[0].value.split(","))
+
+
 def read_last_line(file_path: pathlib.Path, max_line_bytes = 512):
     file_size = os.stat(file_path).st_size
     with file_path.open('rb') as f:

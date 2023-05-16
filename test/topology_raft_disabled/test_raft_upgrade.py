@@ -17,7 +17,7 @@ from cassandra.pool import Host                         # type: ignore # pylint:
 from test.pylib.manager_client import ManagerClient, IPAddress, ServerInfo
 from test.pylib.random_tables import RandomTables
 from test.pylib.rest_client import ScyllaRESTAPIClient, inject_error_one_shot
-from test.pylib.util import wait_for, wait_for_cql_and_get_hosts
+from test.pylib.util import wait_for, wait_for_cql_and_get_hosts, wait_for_feature
 
 
 async def reconnect_driver(manager: ManagerClient) -> Session:
@@ -108,18 +108,6 @@ def log_run_time(f):
     return wrapped
 
 
-# Wait for the given feature to be enabled.
-async def wait_for_feature(feature: str, cql: Session, host: Host, deadline: float) -> None:
-    async def feature_is_enabled():
-        rs = await cql.run_async("select value from system.scylla_local where key = 'enabled_features'", host=host)
-        if rs:
-            value = rs[0].value
-            if feature in value:
-                return True
-        return None
-    await wait_for(feature_is_enabled, deadline)
-
-
 @pytest.mark.asyncio
 @log_run_time
 async def test_upgrade_with_no_schema_commitlog(manager: ManagerClient, random_tables: RandomTables):
@@ -144,7 +132,7 @@ async def test_upgrade_with_no_schema_commitlog(manager: ManagerClient, random_t
 
     # Wait for schema commitlog feature on all nodes, including the new one.
     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
-    await asyncio.gather(*(wait_for_feature("SCHEMA_COMMITLOG", cql, h, time.time() + 60) for h in hosts))
+    await asyncio.gather(*(wait_for_feature("SCHEMA_COMMITLOG", cql, [h], time.time() + 60) for h in hosts))
 
     # restart all the nodes with RAFT enabled
     await asyncio.gather(*(enable_raft_and_restart(manager, srv) for srv in servers))
