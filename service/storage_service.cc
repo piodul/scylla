@@ -1827,8 +1827,16 @@ class topology_coordinator {
         slogger.info("raft topology: coordinator fiber found a node to work on id={} state={}", node.id, node.rs->state);
 
         switch (node.rs->state) {
-            case node_state::normal:
-            case node_state::none: {
+            case node_state::none:
+                if (_topo_sm._topology.normal_nodes.empty() && _topo_sm._topology.transition_nodes.empty()) {
+                    slogger.info("raft topology: skipping join node handshake for the first node in the cluster");
+                } else {
+                    if (!co_await finish_join_node_handshake(node)) {
+                        break;
+                    }
+                }
+                [[fallthrough]];
+            case node_state::normal: {
                 // if the state is none there have to be either 'join' or 'replace' request
                 // if the state is normal there have to be either 'leave', 'remove' or 'rebuild' request
                 topology_mutation_builder builder(node.guard.write_timestamp());
@@ -1998,6 +2006,68 @@ class topology_coordinator {
                 break;
         }
     };
+
+    // Returns `true` if the node was accepted, `false` otherwise
+    future<bool> finish_join_node_handshake(node_to_work_on& node) {
+        auto ip = _address_map.find(node.id);
+        if (!ip) {
+            slogger.warn("raft topology: cannot send JOIN_NODE_RESPONSE to {} because mapping to ip is not available",
+                            node.id);
+            co_await coroutine::exception(std::make_exception_ptr(
+                    std::runtime_error(::format("no ip address mapping for {}", node.id))));
+        }
+
+        auto decision = validate_joining_node(node);
+        const bool node_accepted = std::holds_alternative<join_node_response_params::accepted>(decision);
+
+        release_guard(std::move(node.guard));
+
+        if (node_accepted && !_raft.get_configuration().contains(node.id)) {
+            co_await _raft.modify_config({raft::config_member({node.id, {}}, {})}, {});
+        }
+
+        // TODO: Handle errors here. We should give up after some time
+        // and move the node to the `left` state.
+        co_await ser::join_node_rpc_verbs::send_join_node_response(
+            &_messaging, netw::msg_addr(*ip),
+            node.id,
+            join_node_response_params{
+                .response = std::move(decision),
+            }
+        );
+
+        node = retake_node(co_await start_operation(), node.id);
+
+        if (node_accepted) {
+            slogger.info("raft topology: request to join node {} was accepted", node.id);
+            co_return true;
+        } else {
+            topology_mutation_builder builder(node.guard.write_timestamp());
+            builder.with_node(node.id)
+                   .del("topology_request")
+                   .set("node_state", node_state::left);
+            co_await update_topology_state(take_guard(std::move(node)), {builder.build()},
+                                           format("join: request to join node {} was rejected", node.id));
+            slogger.info("raft topology: request to join node {} was rejected", node.id);
+            co_return false;
+        }
+    }
+
+    std::variant<join_node_response_params::accepted, join_node_response_params::rejected>
+    validate_joining_node(const node_to_work_on& node) {
+        std::vector<sstring> unsupported_features;
+        const auto& supported_features = node.rs->supported_features;
+        std::ranges::set_difference(node.topology->enabled_features, supported_features, std::back_inserter(unsupported_features));
+        if (!unsupported_features.empty()) {
+            slogger.info("raft topology: node {} does not understand some features: {}", node.id, unsupported_features);
+            return join_node_response_params::rejected{
+                .reason = format("Feature check failed. The node does not support some features that are enabled by the cluster: {}",
+                        unsupported_features),
+            };
+        }
+
+        return join_node_response_params::accepted {};
+    }
 
     // Returns true if the state machine was transitioned into tablet migration path.
     future<bool> maybe_start_tablet_migration(group0_guard);
