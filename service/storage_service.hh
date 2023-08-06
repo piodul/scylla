@@ -87,6 +87,11 @@ class storage_proxy;
 class migration_manager;
 class raft_group0;
 
+struct join_node_request_params;
+struct join_node_request_result;
+struct join_node_response_params;
+struct join_node_response_result;
+
 enum class disk_error { regular, commit };
 
 class node_ops_meta_data;
@@ -796,6 +801,16 @@ private:
     // Applies received raft snapshot to local state machine persistent storage
     // raft_group0_client::_read_apply_mutex must be held
     future<> merge_topology_snapshot(raft_topology_snapshot snp);
+
+    canonical_mutation build_mutation_from_join_params(const join_node_request_params& params, service::group0_guard& guard);
+
+    future<join_node_request_result> join_node_request_handler(join_node_request_params params);
+    future<join_node_response_result> join_node_response_handler(join_node_response_params params);
+    shared_promise<> _join_node_request_done;
+    shared_promise<> _join_node_result;
+    semaphore _join_node_response_handler_mutex{1};
+
+    friend class join_node_rpc_handshaker;
 };
 
 }

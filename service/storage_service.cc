@@ -11,6 +11,8 @@
 
 #include "storage_service.hh"
 #include "dht/boot_strapper.hh"
+#include <boost/range/adaptor/filtered.hpp>
+#include <boost/range/adaptor/transformed.hpp>
 #include <seastar/core/distributed.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/coroutine/as_future.hh>
@@ -82,6 +84,8 @@
 #include "idl/storage_service.dist.hh"
 #include "service/storage_proxy.hh"
 #include "service/raft/raft_address_map.hh"
+#include "service/raft/join_node.hh"
+#include "idl/join_node.dist.hh"
 #include "protocol_server.hh"
 #include "types/set.hh"
 
@@ -2148,6 +2152,38 @@ std::unordered_set<raft::server_id> storage_service::find_raft_nodes_from_hoeps(
         ids.insert(*id);
     }
     return ids;
+}
+
+canonical_mutation storage_service::build_mutation_from_join_params(const join_node_request_params& params, service::group0_guard& guard) {
+    topology_mutation_builder builder(guard.write_timestamp());
+    auto& node_builder = builder.with_node(params.host_id)
+        .set("node_state", node_state::none)
+        .set("datacenter", params.datacenter)
+        .set("rack", params.rack)
+        .set("release_version", params.release_version)
+        .set("num_tokens", params.num_tokens)
+        .set("shard_count", params.shard_count)
+        .set("ignore_msb", params.ignore_msb)
+        .set("supported_features", boost::copy_range<std::set<sstring>>(params.supported_features));
+
+    if (params.replaced_id) {
+        std::list<locator::host_id_or_endpoint> ignore_nodes_params;
+        for (const auto& n : params.ignore_nodes) {
+            ignore_nodes_params.emplace_back(n);
+        }
+
+        auto ignored_ids = find_raft_nodes_from_hoeps(ignore_nodes_params);
+
+        node_builder
+            .set("topology_request", topology_request::replace)
+            .set("replaced_id", *params.replaced_id)
+            .set("ignore_nodes", ignored_ids);
+    } else {
+        node_builder
+            .set("topology_request", topology_request::join);
+    }
+
+    return builder.build();
 }
 
 future<> storage_service::raft_replace(raft::server& raft_server, raft::server_id replaced_id, gms::inet_address replaced_ip) {
@@ -6045,6 +6081,167 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
     }
 }
 
+future<join_node_request_result> storage_service::join_node_request_handler(join_node_request_params params) {
+    if (!_raft_topology_change_enabled) {
+        throw std::runtime_error("The node is not configured to use topology over raft");
+    }
+
+    join_node_request_result result;
+    slogger.info("raft topology: received request to join from host_id: {}", params.host_id);
+
+    if (params.cluster_name != _db.local().get_config().cluster_name()) {
+        result.result = join_node_request_result::rejected{
+            .reason = ::format("Cluster name check failed. This node cannot join the cluster "
+                                "because it expected cluster name \"{}\" and not \"{}\"",
+                                params.cluster_name,
+                                _db.local().get_config().cluster_name()),
+        };
+        co_return result;
+    }
+
+    if (params.snitch_name != _db.local().get_snitch_name()) {
+        result.result = join_node_request_result::rejected{
+            .reason = ::format("Snitch name check failed. This node cannot join the cluster "
+                                "because it uses \"{}\" and not \"{}\"",
+                                params.snitch_name,
+                                _db.local().get_snitch_name()),
+        };
+        co_return result;
+    }
+
+    co_await _topology_state_machine.event.when([this] {
+        // The first node defines the cluster and inserts its entry to the
+        // `system.topology` without checking anything. It is unlikely but
+        // possible that the `join_node_request_handler` fires before the first
+        // node inserts its entry, therefore we might need to wait
+        // until that happens, here.
+        return !_topology_state_machine._topology.is_empty();
+    });
+
+    // TODO: Aborts?
+    while (true) {
+        std::optional<group0_guard> guard;
+        try {
+            guard.emplace(co_await _group0->client().start_operation(&_abort_source));
+        } catch (...) {
+            slogger.warn("raft topology: join_node_request: failed to start group0 operation: {}, retrying.",
+                         std::current_exception());
+        }
+        if (!guard) {
+            co_await sleep_abortable(std::chrono::seconds(1), _abort_source);
+            continue;
+        }
+
+        if (const auto *p = _topology_state_machine._topology.find(params.host_id)) {
+            const auto& rs = p->second;
+            switch (rs.state) {
+            case node_state::none:
+                // There is a pending request already. On restart, node validates
+                // that its current params didn't change in an incompatible way,
+                // so we can assume that it's still safe to add this node.
+                result.result = join_node_request_result::ok {};
+                co_return result;
+            case node_state::left:
+                result.result = join_node_request_result::rejected{
+                    .reason = "The node has already been removed from the cluster",
+                };
+                co_return result;
+            default:
+                result.result = join_node_request_result::accepted {};
+                co_return result;
+            }
+        }
+
+        if (params.replaced_id.has_value()) {
+            if (!_topology_state_machine._topology.normal_nodes.contains(*params.replaced_id)) {
+                result.result = join_node_request_result::rejected {
+                    .reason = ::format("Cannot replace node {} because it is not in the 'normal' state", *params.replaced_id),
+                };
+                co_return result;
+            }
+        }
+
+        auto mutation = build_mutation_from_join_params(params, *guard);
+
+        topology_change change{{std::move(mutation)}};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), *guard,
+                format("raft topology: placing join request for {}", params.host_id));
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(*guard), &_abort_source);
+            break;
+        } catch (group0_concurrent_modification&) {
+            slogger.info("raft topology: join_node_request: concurrent operation is detected, retrying.");
+        }
+    }
+
+    slogger.info("raft topology: placed join request for {}", params.host_id);
+
+    // Success
+    result.result = join_node_request_result::ok {};
+    co_return result;
+}
+
+future<join_node_response_result> storage_service::join_node_response_handler(join_node_response_params params) {
+    assert(this_shard_id() == 0);
+
+    // Serialize handling the responses
+    auto lock = co_await get_units(_join_node_response_handler_mutex, 1);
+
+    // Wait until the join_node_request is sent.
+    co_await _join_node_request_done.get_shared_future(_abort_source);
+
+    co_return co_await std::visit(overloaded_functor {
+        [&] (const join_node_response_params::accepted& acc) -> future<join_node_response_result> {
+            // Do a read barrier to read/initialize the topology state
+            auto& raft_server = _group0->group0_server();
+            co_await raft_server.read_barrier(&_abort_source);
+
+            const auto ignore_nodes = is_replacing()
+                    ? parse_node_list(_db.local().get_config().ignore_dead_nodes_for_replace(), get_token_metadata())
+                    : std::unordered_set<gms::inet_address>{};
+
+            // After this RPC finishes, repair or streaming will be run, and
+            // both of them require this node to see the normal nodes as UP.
+            // This condition might not be true yet as this information is
+            // propagated through gossip. In order to reduce the chance of
+            // repair/streaming failure, wait here until we see normal nodes
+            // as UP (or the timeout elapses).
+            std::vector<gms::inet_address> sync_nodes;
+            const auto& amap = _group0->address_map();
+            for (const auto& [id, _] : _topology_state_machine._topology.normal_nodes) {
+                if (auto addr = amap.find(id); addr && !ignore_nodes.contains(*addr)) {
+                    sync_nodes.push_back(*addr);
+                }
+            }
+
+            slogger.info("raft topology: coordinator accepted request to join, "
+                    "waiting for nodes {} toraft topology:be alive before responding and continuing",
+                    sync_nodes);
+            co_await _gossiper.wait_alive(sync_nodes, std::chrono::seconds(30));
+            slogger.info("raft topology: nodes {} are alive", sync_nodes);
+
+            // Unblock waiting raft_perform_join_handshake,
+            // which will start the raft server and continue
+            if (!_join_node_result.available()) {
+                _join_node_result.set_value();
+            }
+
+            join_node_response_result result;
+            co_return result;
+        },
+        [&] (const join_node_response_params::rejected& rej) -> future<join_node_response_result> {
+            if (!_join_node_result.available()) {
+                auto eptr = std::make_exception_ptr(std::runtime_error(
+                        format("the topology coordinator rejected request to join the cluster: {}", rej.reason)));
+                _join_node_result.set_exception(std::move(eptr));
+            }
+
+            join_node_response_result result;
+            co_return result;
+        },
+    }, params.response);
+}
+
 void storage_service::init_messaging_service(sharded<service::storage_proxy>& proxy, sharded<db::system_distributed_keyspace>& sys_dist_ks) {
     _messaging.local().register_node_ops_cmd([this] (const rpc::client_info& cinfo, node_ops_cmd_request req) {
         auto coordinator = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
@@ -6124,12 +6321,23 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
             return ss.stream_tablet(tablet);
         });
     });
+    ser::join_node_rpc_verbs::register_join_node_request(&_messaging.local(), [handle_raft_rpc] (raft::server_id dst_id, service::join_node_request_params params) {
+        return handle_raft_rpc(dst_id, [params = std::move(params)] (auto& ss) mutable {
+            return ss.join_node_request_handler(std::move(params));
+        });
+    });
+    ser::join_node_rpc_verbs::register_join_node_response(&_messaging.local(), [handle_raft_rpc] (raft::server_id dst_id, service::join_node_response_params params) {
+        return handle_raft_rpc(dst_id, [params = std::move(params)] (auto& ss) mutable {
+            return ss.join_node_response_handler(std::move(params));
+        });
+    });
 }
 
 future<> storage_service::uninit_messaging_service() {
     return when_all_succeed(
         _messaging.local().unregister_node_ops_cmd(),
-        ser::storage_service_rpc_verbs::unregister(&_messaging.local())
+        ser::storage_service_rpc_verbs::unregister(&_messaging.local()),
+        ser::join_node_rpc_verbs::unregister(&_messaging.local())
     ).discard_result();
 }
 
