@@ -1803,6 +1803,17 @@ os.makedirs(outdir, exist_ok=True)
 ragel_exec = args.ragel_exec
 
 
+def adjust_cxx_bridge_path(name, new_ext):
+    if name.endswith('/src/lib.rs'):
+        # If the bridge is defined in the crate root (i.e. `<crate>/src/lib.rs`)
+        # then change it to `<crate>.new_ext`
+        return name.replace('/src/lib.rs', new_ext)
+    else:
+        # If the brige is not in the crate root, (.e.g `<crate>/src/<some>/<module>.rs`)
+        # then change it to `<crate>/<some>/<module>.hh`
+        return name.replace('/src/', '/', 1).replace('.rs', new_ext)
+
+
 def write_build_file(f,
                      arch,
                      scylla_product,
@@ -1991,9 +2002,7 @@ def write_build_file(f,
                     objs += dep.objects('$builddir/' + mode + '/gen')
                 if dep.endswith('.rs'):
                     has_rust = True
-                    idx = dep.rindex('/src/')
-                    obj = dep[:idx].replace('rust/','') + '.o'
-                    objs.append('$builddir/' + mode + '/gen/rust/' + obj)
+                    objs.append('$builddir/' + mode + '/gen/' + adjust_cxx_bridge_path(dep, '.o'))
             if has_rust:
                 objs.append('$builddir/' + mode +'/rust-' + mode + '/librust_combined.a')
             local_libs = '$seastar_libs_{} $libs'.format(mode)
@@ -2040,8 +2049,7 @@ def write_build_file(f,
                 elif src.endswith('.g'):
                     antlr3_grammars.add(src)
                 elif src.endswith('.rs'):
-                    idx = src.rindex('/src/')
-                    hh = '$builddir/' + mode + '/gen/' + src[:idx] + '.hh'
+                    hh = '$builddir/' + mode + '/gen/' + adjust_cxx_bridge_path(src, '.hh')
                     rust_headers[hh] = src
                 else:
                     raise Exception('No rule for ' + src)
