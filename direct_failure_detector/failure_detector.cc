@@ -16,10 +16,15 @@
 #include <seastar/core/condition-variable.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/util/defer.hh>
+#include "rust/bridge/cpp_future.hh"
 
 #include "log.hh"
 
 #include "direct_failure_detector/failure_detector.hh"
+
+future_u32 something() {
+    co_return 123;
+}
 
 namespace direct_failure_detector {
 
@@ -183,6 +188,8 @@ failure_detector::impl::impl(failure_detector& parent, pinger& pinger, clock& cl
     if (this_shard_id() != 0) {
         return;
     }
+
+    (void)something()->then([] (uint32_t) { /* dupa */ });
 
     _num_workers.resize(smp::count, 0);
     _update_endpoint_fiber = update_endpoint_fiber();
