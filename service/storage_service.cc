@@ -6324,7 +6324,7 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
             }
 
             slogger.info("raft topology: coordinator accepted request to join, "
-                    "waiting for nodes {} toraft topology:be alive before responding and continuing",
+                    "waiting for nodes {} to be alive before responding and continuing",
                     sync_nodes);
             co_await _gossiper.wait_alive(sync_nodes, std::chrono::seconds(30));
             slogger.info("raft topology: nodes {} are alive", sync_nodes);
