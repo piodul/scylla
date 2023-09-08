@@ -805,6 +805,8 @@ private:
     // raft_group0_client::_read_apply_mutex must be held
     future<> merge_topology_snapshot(raft_topology_snapshot snp);
 
+    future<> check_join_params_on_joining_node(const join_node_request_params& params);
+
     canonical_mutation build_mutation_from_join_params(const join_node_request_params& params, service::group0_guard& guard);
 
     future<join_node_request_result> join_node_request_handler(join_node_request_params params);

@@ -510,6 +510,9 @@ public:
 
     future<std::optional<sstring>> get_snitch_name();
     future<> set_snitch_name(sstring);
+
+    future<std::set<sstring>> get_initial_supported_features();
+    future<> set_initial_supported_features(std::set<sstring>);
 private:
     static service::topology_features decode_topology_features_state(::shared_ptr<cql3::untyped_result_set> rs);
 

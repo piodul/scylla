@@ -2457,6 +2457,22 @@ future<> system_keyspace::set_snitch_name(sstring snitch_name) {
     return set_scylla_local_param_as<sstring>(SNITCH_NAME_KEY, snitch_name);
 }
 
+static constexpr auto INITIAL_SUPPORTED_FEATURES_KEY = "initial_supported_features";
+
+future<std::set<sstring>> system_keyspace::get_initial_supported_features() {
+    std::set<sstring> features;
+    auto features_str = co_await get_scylla_local_param(INITIAL_SUPPORTED_FEATURES_KEY);
+    if (features_str) {
+        features = gms::feature_service::to_feature_set(*features_str);
+    }
+    co_return features;
+}
+
+future<> system_keyspace::set_initial_supported_features(std::set<sstring> features) {
+    auto features_str = fmt::to_string(fmt::join(features, ","));
+    return set_scylla_local_param_as<sstring>(INITIAL_SUPPORTED_FEATURES_KEY, features_str);
+}
+
 static std::set<sstring> decode_features(const set_type_impl::native_type& features) {
     std::set<sstring> fset;
     for (auto& f : features) {

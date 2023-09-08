@@ -2224,6 +2224,29 @@ std::unordered_set<raft::server_id> storage_service::find_raft_nodes_from_hoeps(
     return ids;
 }
 
+future<> storage_service::check_join_params_on_joining_node(const join_node_request_params& params) {
+    const auto currently_supported_features = boost::copy_range<std::set<sstring>>(params.supported_features);
+    const auto initially_supported_features = co_await _sys_ks.local().get_initial_supported_features();
+    if (initially_supported_features.empty()) {
+        co_await _sys_ks.local().set_initial_supported_features(currently_supported_features);
+    } else {
+        std::vector<sstring> revoked_features;
+        std::ranges::set_difference(
+                initially_supported_features,
+                currently_supported_features,
+                std::back_inserter(revoked_features));
+        if (!revoked_features.empty()) {
+            throw std::runtime_error(format("The node didn't finish the previous attempt to join group 0, "
+                    "but it was restarted after revoking support for some features that were "
+                    "initially supported ({}). This is not allowed. Please restart the node with "
+                    "the original set of features, or clear the data directory and then restart.",
+                    revoked_features));
+        }
+    }
+
+    co_return;
+}
+
 canonical_mutation storage_service::build_mutation_from_join_params(const join_node_request_params& params, service::group0_guard& guard) {
     topology_mutation_builder builder(guard.write_timestamp());
     auto& node_builder = builder.with_node(params.host_id)
@@ -2772,6 +2795,10 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     if (raft_replace_info) {
         join_params.replaced_id = raft_replace_info->raft_id;
         join_params.ignore_nodes = utils::split_comma_separated_list(_db.local().get_config().ignore_dead_nodes_for_replace());
+    }
+
+    if (!_group0->joined_group0()) {
+        co_await check_join_params_on_joining_node(join_params);
     }
 
     // if the node is bootstrapped the functin will do nothing since we already created group0 in main.cc
