@@ -508,6 +508,8 @@ public:
     future<bool> get_must_synchronize_topology();
     future<> set_must_synchronize_topology(bool);
 
+    future<std::optional<sstring>> get_snitch_name();
+    future<> set_snitch_name(sstring);
 private:
     static service::topology_features decode_topology_features_state(::shared_ptr<cql3::untyped_result_set> rs);
 

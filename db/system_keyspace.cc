@@ -2447,6 +2447,16 @@ future<> system_keyspace::set_must_synchronize_topology(bool value) {
     return set_scylla_local_param_as<bool>(MUST_SYNCHRONIZE_TOPOLOGY_KEY, value);
 }
 
+static constexpr auto SNITCH_NAME_KEY = "snitch_name";
+
+future<std::optional<sstring>> system_keyspace::get_snitch_name() {
+    return get_scylla_local_param_as<sstring>(SNITCH_NAME_KEY);
+}
+
+future<> system_keyspace::set_snitch_name(sstring snitch_name) {
+    return set_scylla_local_param_as<sstring>(SNITCH_NAME_KEY, snitch_name);
+}
+
 static std::set<sstring> decode_features(const set_type_impl::native_type& features) {
     std::set<sstring> fset;
     for (auto& f : features) {

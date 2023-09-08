@@ -1119,6 +1119,15 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             linfo.listen_address = listen_address;
             sys_ks.local().save_local_info(std::move(linfo)).get();
 
+            auto snitch_name = sys_ks.local().get_snitch_name().get();
+            if (!snitch_name) {
+                sys_ks.local().set_snitch_name(cfg->endpoint_snitch()).get();
+            } else if (*snitch_name != cfg->endpoint_snitch()) {
+                throw exceptions::configuration_exception(format(
+                        "Saved snitch name {} != configured name {}",
+                        *snitch_name, cfg->endpoint_snitch()));
+            }
+
           shared_token_metadata::mutate_on_all_shards(token_metadata, [hostid = cfg->host_id, endpoint = utils::fb_utilities::get_broadcast_address()] (locator::token_metadata& tm) {
               // Makes local host id available in topology cfg as soon as possible.
               // Raft topology discard the endpoint-to-id map, so the local id can
