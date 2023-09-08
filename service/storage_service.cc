@@ -994,7 +994,7 @@ class topology_coordinator {
         auto result = utils::fb_utilities::is_me(*ip) ?
                     co_await _raft_topology_cmd_handler(_sys_dist_ks, _term, cmd_index, cmd) :
                     co_await ser::storage_service_rpc_verbs::send_raft_topology_cmd(
-                            &_messaging, netw::msg_addr{*ip}, _term, cmd_index, cmd);
+                            &_messaging, netw::msg_addr{*ip}, id, _term, cmd_index, cmd);
         if (result.status == raft_topology_cmd_result::command_status::fail) {
             co_await coroutine::exception(std::make_exception_ptr(
                     std::runtime_error(::format("failed status returned from {}/{}", id, *ip))));
@@ -1424,7 +1424,7 @@ class topology_coordinator {
                         slogger.info("raft topology: Initiating tablet streaming of {} to {}", gid, trinfo.pending_replica);
                         auto dst = trinfo.pending_replica.host;
                         return ser::storage_service_rpc_verbs::send_tablet_stream_data(&_messaging,
-                                   netw::msg_addr(id2ip(dst)), _as, gid);
+                                   netw::msg_addr(id2ip(dst)), _as, raft::server_id(dst.uuid()), gid);
                     })) {
                         transition_to(locator::tablet_transition_stage::write_both_read_new);
                     }
@@ -6050,13 +6050,24 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
             return ss.node_ops_cmd_handler(coordinator, std::move(req));
         });
     });
-    ser::storage_service_rpc_verbs::register_raft_topology_cmd(&_messaging.local(), [this, &sys_dist_ks] (raft::term_t term, uint64_t cmd_index, raft_topology_cmd cmd) {
-        return container().invoke_on(0, [&sys_dist_ks, cmd = std::move(cmd), term, cmd_index] (auto& ss) {
+    auto handle_raft_rpc = [&cont = container()] (std::optional<raft::server_id> dst_id, auto handler) {
+        return cont.invoke_on(0, [dst_id, handler = std::move(handler)] (auto& ss) mutable {
+            if (!ss._group0 || !ss._group0->joined_group0()) {
+                throw std::runtime_error("The node did not join group 0 yet");
+            }
+            if (dst_id && ss._group0->load_my_id() != *dst_id) {
+                throw raft_destination_id_not_correct(ss._group0->load_my_id(), *dst_id);
+            }
+            return handler(ss);
+        });
+    };
+    ser::storage_service_rpc_verbs::register_raft_topology_cmd(&_messaging.local(), [&sys_dist_ks, handle_raft_rpc] (raft::server_id dst_id, raft::term_t term, uint64_t cmd_index, raft_topology_cmd cmd) {
+        return handle_raft_rpc(dst_id, [&sys_dist_ks, cmd = std::move(cmd), term, cmd_index] (auto& ss) {
             return ss.raft_topology_cmd_handler(sys_dist_ks, term, cmd_index, cmd);
         });
     });
-    ser::storage_service_rpc_verbs::register_raft_pull_topology_snapshot(&_messaging.local(), [this, &proxy] (raft_topology_pull_params params) {
-        return container().invoke_on(0, [&proxy] (auto& ss) -> future<raft_topology_snapshot> {
+    ser::storage_service_rpc_verbs::register_raft_pull_topology_snapshot(&_messaging.local(), [&proxy, handle_raft_rpc] (raft_topology_pull_params params, rpc::optional<raft::server_id> dst_id) {
+        return handle_raft_rpc(dst_id, [&proxy] (storage_service& ss) -> future<raft_topology_snapshot> {
             if (!ss._raft_topology_change_enabled) {
                co_return raft_topology_snapshot{};
             }
@@ -6106,8 +6117,10 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
             };
         });
     });
-    ser::storage_service_rpc_verbs::register_tablet_stream_data(&_messaging.local(), [this] (locator::global_tablet_id tablet) {
-        return stream_tablet(tablet);
+    ser::storage_service_rpc_verbs::register_tablet_stream_data(&_messaging.local(), [handle_raft_rpc] (raft::server_id dst_id, locator::global_tablet_id tablet) {
+        return handle_raft_rpc(dst_id, [tablet] (auto& ss) {
+            return ss.stream_tablet(tablet);
+        });
     });
 }
 

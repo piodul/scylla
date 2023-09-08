@@ -49,7 +49,7 @@ struct raft_topology_snapshot {
 
 struct raft_topology_pull_params {};
 
-verb raft_topology_cmd (raft::term_t term, uint64_t cmd_index, service::raft_topology_cmd) -> service::raft_topology_cmd_result;
-verb [[cancellable]] raft_pull_topology_snapshot (service::raft_topology_pull_params) -> service::raft_topology_snapshot;
-verb [[cancellable]] tablet_stream_data (locator::global_tablet_id);
+verb raft_topology_cmd (raft::server_id dst_id, raft::term_t term, uint64_t cmd_index, service::raft_topology_cmd) -> service::raft_topology_cmd_result;
+verb [[cancellable]] raft_pull_topology_snapshot (service::raft_topology_pull_params, raft::server_id dst_id [[version 5.4.0]]) -> service::raft_topology_snapshot;
+verb [[cancellable]] tablet_stream_data (raft::server_id dst_id, locator::global_tablet_id);
 }

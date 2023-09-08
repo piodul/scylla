@@ -199,7 +199,7 @@ future<> group0_state_machine::load_snapshot(raft::snapshot_id id) {
     _ss._topology_state_machine.event.broadcast();
 }
 
-future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::snapshot_descriptor snp) {
+future<> group0_state_machine::transfer_snapshot(gms::inet_address from_ip, raft::server_id from_id, raft::snapshot_descriptor snp) {
   try {
     // Note that this may bring newer state than the group0 state machine raft's
     // log, so some raft entries may be double applied, but since the state
@@ -207,8 +207,8 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
 
     auto holder = _gate.hold();
 
-    slogger.trace("transfer snapshot from {} index {} snp id {}", from, snp.idx, snp.id);
-    netw::messaging_service::msg_addr addr{from, 0};
+    slogger.trace("transfer snapshot from {} index {} snp id {}", from_ip, snp.idx, snp.id);
+    netw::messaging_service::msg_addr addr{from_ip, 0};
     auto& as = _abort_source;
 
     // (Ab)use MIGRATION_REQUEST to also transfer group0 history table mutation besides schema tables mutations.
@@ -219,7 +219,7 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
         on_internal_error(slogger, "Expected MIGRATION_REQUEST to return canonical mutations");
     }
 
-    auto topology_snp = co_await ser::storage_service_rpc_verbs::send_raft_pull_topology_snapshot(&_mm._messaging, addr, as, service::raft_topology_pull_params{});
+    auto topology_snp = co_await ser::storage_service_rpc_verbs::send_raft_pull_topology_snapshot(&_mm._messaging, addr, as, service::raft_topology_pull_params{}, from_id);
 
     auto history_mut = extract_history_mutation(*cm, _sp.data_dictionary());
 
