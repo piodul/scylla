@@ -1,0 +1,18 @@
+[package]
+name = "unit_tests"
+version = "0.1.0"
+edition = "2021"
+autoexamples = false # Examples must be added manually
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+seastar = { version = "0.1.0", path = "../../rust/seastar" }
+
+# For each test, please add an [[example]] section.
+# All examples must be staticlibs because we want to use the same linker
+# invocation to link against the C++ stuff.
+
+[[example]]
+name = "smoke_test"
+crate-type = ["staticlib"]
