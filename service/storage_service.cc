@@ -6299,6 +6299,12 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
     // Wait until the join_node_request is sent.
     co_await _join_node_request_done.get_shared_future(_abort_source);
 
+    if (_join_node_result.available()) {
+        // We already handled this RPC. Return immediately for idempotence.
+        join_node_response_result result;
+        co_return result;
+    }
+
     co_return co_await std::visit(overloaded_functor {
         [&] (const join_node_response_params::accepted& acc) -> future<join_node_response_result> {
             // Do a read barrier to read/initialize the topology state
@@ -6307,7 +6313,13 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
 
             const auto ignore_nodes = is_replacing()
                     ? parse_node_list(_db.local().get_config().ignore_dead_nodes_for_replace(), get_token_metadata())
+                    // TODO: ignore_dead_nodes setting for bootstrap
                     : std::unordered_set<gms::inet_address>{};
+
+            auto* me = _topology_state_machine._topology.find(_group0->load_my_id());
+            if (!me) {
+                throw std::runtime_error("The node was removed from the cluster");
+            }
 
             // After this RPC finishes, repair or streaming will be run, and
             // both of them require this node to see the normal nodes as UP.
@@ -6331,19 +6343,15 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
 
             // Unblock waiting raft_perform_join_handshake,
             // which will start the raft server and continue
-            if (!_join_node_result.available()) {
-                _join_node_result.set_value();
-            }
+            _join_node_result.set_value();
 
             join_node_response_result result;
             co_return result;
         },
         [&] (const join_node_response_params::rejected& rej) -> future<join_node_response_result> {
-            if (!_join_node_result.available()) {
-                auto eptr = std::make_exception_ptr(std::runtime_error(
-                        format("the topology coordinator rejected request to join the cluster: {}", rej.reason)));
-                _join_node_result.set_exception(std::move(eptr));
-            }
+            auto eptr = std::make_exception_ptr(std::runtime_error(
+                    format("the topology coordinator rejected request to join the cluster: {}", rej.reason)));
+            _join_node_result.set_exception(std::move(eptr));
 
             join_node_response_result result;
             co_return result;
