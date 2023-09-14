@@ -1,0 +1,18 @@
+#
+# Copyright (C) 2023-present ScyllaDB
+#
+
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+
+generator: exceptions
+internal: true
+includes:
+- <seastar/core/abort_source.hh>
+- <seastar/core/timed_out_error.hh>
+items:
+- cpp: seastar::abort_requested_exception
+  rust: AbortRequestedException
+- cpp: seastar::timed_out_error
+  rust: TimedOutError

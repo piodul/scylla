@@ -1,0 +1,17 @@
+#
+# Copyright (C) 2023-present ScyllaDB
+#
+
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+
+generator: exceptions
+internal: true
+includes:
+- <exception>
+items:
+- cpp: std::exception
+  rust: CxxException
+- cpp: std::runtime_error
+  rust: CxxRuntimeError

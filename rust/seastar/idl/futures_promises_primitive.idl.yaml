@@ -1,0 +1,33 @@
+#
+# Copyright (C) 2023-present ScyllaDB
+#
+
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+
+generator: futures_promises
+internal: true
+includes:
+- <cstdint>
+items:
+- cpp: void
+  rust: ()
+- cpp: bool
+  rust: bool
+- cpp: int8_t
+  rust: i8
+- cpp: int16_t
+  rust: i16
+- cpp: int32_t
+  rust: i32
+- cpp: int64_t
+  rust: i64
+- cpp: uint8_t
+  rust: u8
+- cpp: uint16_t
+  rust: u16
+- cpp: uint32_t
+  rust: u32
+- cpp: uint64_t
+  rust: u64

@@ -1189,7 +1189,17 @@ scylla_core = (['message/messaging_service.cc',
                 'rust/wasmtime_bindings/src/lib.rs',
                 'utils/to_string.cc',
                 'service/topology_state_machine.cc',
-                'node_ops/node_ops_ctl.cc'
+                'node_ops/node_ops_ctl.cc',
+                'rust/cxx/future.cc',
+                'rust/cxx/promise.cc',
+                'rust/cxx/task.cc',
+                'rust/cxx/exception.cc',
+                'rust/cxx/smp.cc',
+                'rust/cxx/dist.cc',
+                'rust/cxx/abort_source.cc',
+                'rust/seastar/src/sched.rs',
+                'rust/seastar/src/test.rs',
+                'rust/seastar/src/abort_source.rs',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
                )
@@ -1313,6 +1323,12 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/utils.idl.hh',
         ]
 
+rust_idls = [
+    'rust/seastar/idl/futures_promises_primitive.idl.yaml',
+    'rust/seastar/idl/exceptions_std.idl.yaml',
+    'rust/seastar/idl/exceptions_seastar.idl.yaml',
+]
+
 scylla_tests_generic_dependencies = [
     'test/lib/cql_test_env.cc',
     'test/lib/test_services.cc',
@@ -1322,7 +1338,7 @@ scylla_tests_generic_dependencies = [
     'test/lib/sstable_run_based_compaction_strategy_for_tests.cc',
 ]
 
-scylla_tests_dependencies = scylla_core + alternator + idls + scylla_tests_generic_dependencies + [
+scylla_tests_dependencies = scylla_core + alternator + idls + rust_idls + scylla_tests_generic_dependencies + [
     'test/lib/cql_assertions.cc',
     'test/lib/result_set_assertions.cc',
     'test/lib/mutation_source_test.cc',
@@ -1354,7 +1370,7 @@ scylla_perfs = ['test/perf/perf_fast_forward.cc',
                 'seastar/tests/perf/linux_perf_event.cc']
 
 deps = {
-    'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis + scylla_tools + scylla_perfs,
+    'scylla': idls + rust_idls + ['main.cc'] + scylla_core + api + alternator + redis + scylla_tools + scylla_perfs,
 }
 
 pure_boost_tests = set([
@@ -1885,6 +1901,12 @@ def write_build_file(f,
         rule rust_source
             command = cxxbridge --include rust/cxx.h $in > $out
             description = RUST_SOURCE $out
+        rule rust_gen_header
+            command = python3 rust/gen.py cpp-header $in > $out
+            description = RUST_GEN_HEADER $out
+        rule rust_gen_dist
+            command = python3 rust/gen.py cpp-dist $in > $out
+            description = RUST_GEN_DIST $out
         rule cxxbridge_header
             command = cxxbridge --header > $out
         rule c2wasm
@@ -2015,6 +2037,8 @@ def write_build_file(f,
         ragels = {}
         antlr3_grammars = set()
         rust_headers = {}
+        rust_gen_headers = {}
+        rust_gen_dists = {}
         seastar_lib_ext = 'so' if modeval['build_seastar_shared_libs'] else 'a'
         seastar_dep = f'$builddir/{mode}/seastar/libseastar.{seastar_lib_ext}'
         seastar_testing_dep = f'$builddir/{mode}/seastar/libseastar_testing.{seastar_lib_ext}'
@@ -2074,8 +2098,15 @@ def write_build_file(f,
                     obj = '$builddir/' + mode + '/' + src.replace('.cc', '.o')
                     compiles[obj] = src
                 elif src.endswith('.idl.hh'):
+                    # RPC/serialization IDL
                     hh = '$builddir/' + mode + '/gen/' + src.replace('.idl.hh', '.dist.hh')
                     serializers[hh] = src
+                elif src.endswith('.idl.yaml'):
+                    # Rust IDL
+                    hh = f'$builddir/{mode}/gen/' + src.replace('idl.yaml', 'idl.hh')
+                    rust_gen_headers[hh] = src
+                    hh = hh.replace('idl.hh', 'dist.hh')
+                    rust_gen_dists[hh] = src
                 elif src.endswith('.json'):
                     swaggers.add(src)
                 elif src.endswith('.rl'):
@@ -2129,6 +2160,8 @@ def write_build_file(f,
         gen_headers += list(serializers.keys())
         gen_headers += list(ragels.keys())
         gen_headers += list(rust_headers.keys())
+        gen_headers += list(rust_gen_headers.keys())
+        gen_headers += list(rust_gen_dists.keys())
         gen_headers.append('$builddir/{}/gen/rust/cxx.h'.format(mode))
         gen_headers_dep = ' '.join(gen_headers)
 
@@ -2147,6 +2180,10 @@ def write_build_file(f,
         for hh in serializers:
             src = serializers[hh]
             f.write('build {}: serializer {} | idl-compiler.py\n'.format(hh, src))
+        for hh, src in sorted(rust_gen_headers.items()):
+            f.write(f'build {hh}: rust_gen_header {src} | rust/gen.py\n')
+        for hh, src in sorted(rust_gen_dists.items()):
+            f.write(f'build {hh}: rust_gen_dist {src} | rust/gen.py\n')
         for hh in ragels:
             src = ragels[hh]
             f.write('build {}: ragel {}\n'.format(hh, src))
