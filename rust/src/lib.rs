@@ -7,4 +7,6 @@
  */
 
 extern crate inc;
+extern crate seastar;
+extern crate seastar_macros;
 extern crate wasmtime_bindings;

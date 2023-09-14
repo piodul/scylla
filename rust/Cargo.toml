@@ -6,6 +6,8 @@ edition = "2021"
 
 [dependencies]
 inc = { path = "inc", version = "0.1.0" }
+seastar = { path = "seastar", version = "0.1.0" }
+seastar-macros = { path = "seastar-macros", version = "0.1.0" }
 wasmtime_bindings = { path = "wasmtime_bindings", version = "0.1.0" }
 
 [lib]
