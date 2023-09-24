@@ -17,9 +17,9 @@ use crate::future::BoxFutureTarget;
 use crate::promise::{BoxPromise, BoxPromiseTarget};
 use crate::BoxFuture;
 
-pub fn spawn_for_cpp<T>(future: impl Future<Output = T>) -> BoxFuture<T>
+pub fn spawn_for_cpp<T>(future: impl Future<Output = T> + 'static) -> BoxFuture<T>
 where
-    T: BoxPromiseTarget + BoxFutureTarget,
+    T: BoxPromiseTarget + BoxFutureTarget + 'static,
 {
     let promise = BoxPromise::new();
     let sfut = promise.get_future();
@@ -86,7 +86,7 @@ type FuturePollFn = extern "C" fn(task: *mut c_void, fut: *mut c_void) -> c_int;
 /// being polled to synchronize with waiters.
 fn spawn_void<Fut>(fut: Fut)
 where
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = ()> + 'static,
 {
     extern "C" {
         #[link_name = "seastar_rs_task_spawn"]
