@@ -28,6 +28,12 @@ namespace locator {
 
 static logging::logger tlogger("token_metadata");
 
+template <typename NodeId>
+inline static constexpr const topology::key_kind kind_for_node_id_type
+        = std::is_same_v<NodeId, gms::inet_address>
+        ? topology::key_kind::inet_address
+        : topology::key_kind::host_id;
+
 template <typename C, typename V>
 static void remove_by_value(C& container, V value) {
     for (auto it = container.begin(); it != container.end();) {
@@ -94,9 +100,9 @@ private:
     struct shallow_copy {};
 public:
     token_metadata_impl(shallow_copy, const token_metadata_impl& o) noexcept
-        : _topology(topology::config{})
+        : _topology(topology::config{}, kind_for_node_id_type<NodeId>)
     {}
-    token_metadata_impl(token_metadata::config cfg) noexcept : _topology(std::move(cfg.topo_cfg)) {};
+    token_metadata_impl(token_metadata::config cfg) noexcept : _topology(std::move(cfg.topo_cfg), kind_for_node_id_type<NodeId>) {};
     token_metadata_impl(const token_metadata_impl&) = delete; // it's too huge for direct copy, use clone_async()
     token_metadata_impl(token_metadata_impl&&) noexcept = default;
     const std::vector<token>& sorted_tokens() const;
