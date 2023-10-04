@@ -440,20 +440,35 @@ const node* topology::find_node(node::idx_type idx) const noexcept {
     return _nodes.at(idx).get();
 }
 
-const node* topology::add_or_update_endpoint(inet_address ep, std::optional<host_id> opt_id, std::optional<endpoint_dc_rack> opt_dr, std::optional<node::state> opt_st, std::optional<shard_id> shard_count)
+const node* topology::add_or_update_endpoint(std::optional<inet_address> opt_ep, std::optional<host_id> opt_id, std::optional<endpoint_dc_rack> opt_dr, std::optional<node::state> opt_st, std::optional<shard_id> shard_count)
 {
     if (tlogger.is_enabled(log_level::trace)) {
         tlogger.trace("topology[{}]: add_or_update_endpoint: ep={} host_id={} dc={} rack={} state={} shards={}, at {}", fmt::ptr(this),
-            ep, opt_id.value_or(host_id::create_null_id()), opt_dr.value_or(endpoint_dc_rack{}).dc, opt_dr.value_or(endpoint_dc_rack{}).rack, opt_st.value_or(node::state::none), shard_count,
+            opt_ep, opt_id.value_or(host_id::create_null_id()), opt_dr.value_or(endpoint_dc_rack{}).dc, opt_dr.value_or(endpoint_dc_rack{}).rack, opt_st.value_or(node::state::none), shard_count,
             current_backtrace());
     }
-    auto n = find_node(ep);
-    if (n) {
+
+    switch (_key_kind) {
+    case topology::key_kind::host_id:
+        if (!opt_id) {
+            on_internal_error(tlogger, format("topology: host_id is not set, ep={}", opt_ep));
+        }
+        break;
+    case topology::key_kind::inet_address:
+        if (!opt_ep) {
+            on_internal_error(tlogger, format("topology: endpoint is not set, id={}", opt_id));
+        }
+        break;
+    }
+
+    const node* n;
+    if (opt_ep && (n = find_node(*opt_ep))) {
         return update_node(make_mutable(n), opt_id, std::nullopt, std::move(opt_dr), std::move(opt_st), std::move(shard_count));
     } else if (opt_id && (n = find_node(*opt_id))) {
-        return update_node(make_mutable(n), std::nullopt, ep, std::move(opt_dr), std::move(opt_st), std::move(shard_count));
+        return update_node(make_mutable(n), std::nullopt, opt_ep, std::move(opt_dr), std::move(opt_st), std::move(shard_count));
     } else {
-        return add_node(opt_id.value_or(host_id::create_null_id()), ep,
+        return add_node(opt_id.value_or(host_id::create_null_id()),
+                        opt_ep.value_or(inet_address{}),
                         opt_dr.value_or(endpoint_dc_rack::default_location),
                         opt_st.value_or(node::state::normal),
                         shard_count.value_or(0));

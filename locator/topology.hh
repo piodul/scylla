@@ -238,7 +238,7 @@ public:
      *
      * Adds or updates a node with given endpoint
      */
-    const node* add_or_update_endpoint(inet_address ep, std::optional<host_id> opt_id,
+    const node* add_or_update_endpoint(std::optional<inet_address> ep, std::optional<host_id> opt_id,
                                        std::optional<endpoint_dc_rack> opt_dr,
                                        std::optional<node::state> opt_st,
                                        std::optional<shard_id> shard_count = std::nullopt);
