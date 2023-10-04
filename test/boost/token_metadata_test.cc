@@ -18,7 +18,7 @@ using namespace locator;
 namespace {
     const auto ks_name = sstring("test-ks");
 
-    endpoint_dc_rack get_dc_rack(inet_address) {
+    endpoint_dc_rack get_dc_rack(host_id_xor_endpoint) {
         return {
             .dc = "unk-dc",
             .rack = "unk-rack"
