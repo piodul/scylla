@@ -5820,7 +5820,9 @@ future<> storage_service::update_topology_change_info(mutable_token_metadata_ptr
     assert(this_shard_id() == 0);
 
     try {
-        locator::dc_rack_fn get_dc_rack_from_gossiper([this] (inet_address ep) { return get_dc_rack_for(ep); });
+        locator::dc_rack_fn get_dc_rack_from_gossiper([this] (locator::host_id_xor_endpoint ep) {
+            return get_dc_rack_for(std::get<inet_address>(ep));
+        });
         co_await tmptr->update_topology_change_info(get_dc_rack_from_gossiper);
     } catch (...) {
         auto ep = std::current_exception();

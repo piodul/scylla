@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <variant>
 #include <seastar/core/sstring.hh>
 
 #include "gms/inet_address.hh"
@@ -31,6 +32,7 @@ struct endpoint_dc_rack {
     bool operator==(const endpoint_dc_rack&) const = default;
 };
 
-using dc_rack_fn = seastar::noncopyable_function<std::optional<endpoint_dc_rack>(inet_address)>;
+using host_id_xor_endpoint = std::variant<inet_address, host_id>;
+using dc_rack_fn = seastar::noncopyable_function<std::optional<endpoint_dc_rack>(host_id_xor_endpoint)>;
 
 } // namespace locator
