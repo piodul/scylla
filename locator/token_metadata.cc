@@ -1003,7 +1003,7 @@ generic_token_metadata<NodeId>::get_bootstrap_tokens() const {
 
 template <typename NodeId>
 void
-generic_token_metadata<NodeId>::update_topology(inet_address ep, std::optional<endpoint_dc_rack> opt_dr, std::optional<node::state> opt_st, std::optional<shard_id> shard_count) {
+generic_token_metadata<NodeId>::update_topology(NodeId ep, std::optional<endpoint_dc_rack> opt_dr, std::optional<node::state> opt_st, std::optional<shard_id> shard_count) {
     _impl->update_topology(ep, std::move(opt_dr), std::move(opt_st), std::move(shard_count));
 }
 
