@@ -17,7 +17,9 @@
 
 namespace locator {
 
-class token_metadata;
+template <typename NodeId>
+class generic_token_metadata;
+using token_metadata = generic_token_metadata<gms::inet_address>;
 
 };
 

@@ -22,7 +22,9 @@ class keyspace_metadata;
 }
 
 namespace locator {
-    class token_metadata;
+    template <typename NodeId>
+    class generic_token_metadata;
+    using token_metadata = generic_token_metadata<gms::inet_address>;
     class shared_token_metadata;
     struct snitch_ptr;
     class abstract_replication_strategy;

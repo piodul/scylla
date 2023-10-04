@@ -35,7 +35,9 @@ using schema_ptr = seastar::lw_shared_ptr<const schema>;
 
 namespace locator {
 
-class token_metadata;
+template <typename NodeId>
+class generic_token_metadata;
+using token_metadata = generic_token_metadata<gms::inet_address>;
 
 } // namespace locator
 

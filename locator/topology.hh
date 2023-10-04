@@ -394,6 +394,7 @@ private:
         return _nodes_by_endpoint;
     };
 
+    template <typename NodeId>
     friend class token_metadata_impl;
 public:
     void test_compare_endpoints(const inet_address& address, const inet_address& a1, const inet_address& a2) const;

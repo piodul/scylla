@@ -34,7 +34,9 @@ class stream_manager;
 
 namespace locator {
 
-class token_metadata;
+template <typename NodeId>
+class generic_token_metadata;
+using token_metadata = generic_token_metadata<gms::inet_address>;
 class shared_token_metadata;
 class snitch_ptr;
 
