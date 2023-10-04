@@ -417,6 +417,7 @@ future<> storage_service::topology_state_load() {
             }
             update_topology(host_id, ip, rs);
             co_await tmptr->update_normal_tokens(rs.ring.value().tokens, ip);
+            co_await tmptr->get_new()->update_normal_tokens(rs.ring.value().tokens, host_id);
         };
 
         for (const auto& [id, rs]: _topology_state_machine._topology.normal_nodes) {

@@ -20,6 +20,9 @@
 namespace data_dictionary {
 class keyspace_metadata;
 }
+namespace gms {
+    class inet_address;
+}
 
 namespace locator {
     template <typename NodeId>

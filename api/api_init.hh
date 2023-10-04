@@ -32,6 +32,10 @@ namespace streaming {
 class stream_manager;
 }
 
+namespace gms {
+    class inet_address;
+}
+
 namespace locator {
 
 template <typename NodeId>

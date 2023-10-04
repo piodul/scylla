@@ -252,6 +252,8 @@ public:
      */
     bool remove_endpoint(inet_address ep);
 
+    bool remove_endpoint(locator::host_id ep);
+
     /**
      * Returns true iff contains given endpoint.
      */

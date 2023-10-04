@@ -70,7 +70,8 @@ struct host_id_or_endpoint {
 
     // Map the host_id to endpoint based on whichever of them is set,
     // using the token_metadata
-    void resolve(const token_metadata& tm);
+    template <typename NodeId>
+    void resolve(const generic_token_metadata<NodeId>& tm);
 };
 
 template <typename NodeId>
@@ -91,6 +92,7 @@ public:
 template <typename NodeId = gms::inet_address>
 class generic_token_metadata final: public generic_token_metadata_base {
     std::unique_ptr<token_metadata_impl<NodeId>> _impl;
+    std::unique_ptr<generic_token_metadata<locator::host_id>> _new_value;
 private:
     friend class token_metadata_ring_splitter;
     class tokens_iterator {
@@ -137,6 +139,12 @@ public:
     const std::unordered_map<token, NodeId>& get_token_to_endpoint() const;
     const std::unordered_set<NodeId>& get_leaving_endpoints() const;
     const std::unordered_map<token, NodeId>& get_bootstrap_tokens() const;
+
+    template <typename T = NodeId>
+    requires std::is_same_v<T, gms::inet_address>
+    generic_token_metadata<locator::host_id>* get_new() {
+        return _new_value.get();
+    }
 
     /**
      * Update or add endpoint given its inet_address and endpoint_dc_rack.
@@ -299,10 +307,13 @@ private:
     void set_version_tracker(version_tracker_t tracker);
 };
 
+extern template class generic_token_metadata<locator::host_id>;
+extern template class generic_token_metadata<gms::inet_address>;
+
 template <typename NodeId>
 struct topology_change_info {
-    token_metadata target_token_metadata;
-    std::optional<token_metadata> base_token_metadata;
+    generic_token_metadata<NodeId> target_token_metadata;
+    std::optional<generic_token_metadata<NodeId>> base_token_metadata;
     std::vector<dht::token> all_tokens;
     token_metadata::read_new_t read_new;
 
