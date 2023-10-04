@@ -5824,6 +5824,22 @@ future<> storage_service::update_topology_change_info(mutable_token_metadata_ptr
             return get_dc_rack_for(std::get<inet_address>(ep));
         });
         co_await tmptr->update_topology_change_info(get_dc_rack_from_gossiper);
+
+        locator::dc_rack_fn get_dc_rack_from_raft([this] (locator::host_id_xor_endpoint ep) -> std::optional<locator::endpoint_dc_rack> {
+            const auto host_id = std::get<locator::host_id>(ep);
+            const auto server_id = raft::server_id(host_id.uuid());
+            const auto* node = _topology_state_machine._topology.find(server_id);
+            if (node) {
+                return locator::endpoint_dc_rack{
+                    .dc = node->second.datacenter,
+                    .rack = node->second.rack,
+                };
+            } else {
+                return std::nullopt;
+            }
+        });
+        co_await tmptr->get_new()->update_topology_change_info(get_dc_rack_from_raft);
+
     } catch (...) {
         auto ep = std::current_exception();
         slogger.error("Failed to update topology change info for {}: {}", reason, ep);
