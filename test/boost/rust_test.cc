@@ -111,3 +111,7 @@ SEASTAR_TEST_CASE(test_seastar_rust_transparently_handles_exceptions) {
 
     co_return;
 }
+
+SEASTAR_TEST_CASE(test_seastar_rust_submit_to) {
+    co_await std::move(*seastar::rs::test::test_submit_to());
+}

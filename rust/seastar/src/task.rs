@@ -6,55 +6,242 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-use std::ffi::{c_int, c_void};
+use std::any::Any;
+use std::cell::Cell;
+use std::ffi::{c_int, c_uint, c_void};
 use std::future::Future;
+use std::mem::MaybeUninit;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::exception::CxxExceptionPtr;
 use crate::future::BoxFutureTarget;
+use crate::native::oneshot::{self, OneshotCell, Receiver};
 use crate::promise::{BoxPromise, BoxPromiseTarget};
+use crate::smp::{self, ShardId};
 use crate::BoxFuture;
 
+// TODO: Use pin_project to reduce reliance on unsafe code
+
+/// Spawns a task and returns a BoxFuture<T> that returns its result.
+///
+/// Use this function if you want to spawn an asynchronous operation which will be waited on by C++.
+/// If you just want to spawn a Rust task and also wait on it from Rust, consider using `spawn` instead
+/// which doesn't require code generation.
 pub fn spawn_for_cpp<T>(future: impl Future<Output = T> + 'static) -> BoxFuture<T>
 where
     T: BoxPromiseTarget + BoxFutureTarget + 'static,
 {
     let promise = BoxPromise::new();
     let sfut = promise.get_future();
-    spawn_void(SpawnFuture { future, promise });
+    let completer = move |res| match res {
+        Ok(t) => promise.set_value(t),
+        Err(payload) => {
+            let eptr = CxxExceptionPtr::try_from_panic(payload)
+                .unwrap_or_else(|payload| CxxExceptionPtr::panic_to_exception(payload));
+            promise.set_exception(eptr);
+        }
+    };
+    spawn_with_completer(future, completer);
     sfut
 }
 
-// A future that forwards the result of the inner future to the seastar promise
-struct SpawnFuture<F, T>
+pub type TaskHandle<T> = Receiver<Result<T, Box<dyn Any + Send>>>;
+
+pub fn spawn<T>(future: impl Future<Output = T> + 'static) -> TaskHandle<T>
 where
-    F: Future<Output = T>,
-    T: BoxPromiseTarget,
+    T: 'static,
 {
-    future: F,
-    promise: BoxPromise<T>,
+    let (sender, receiver) = oneshot::oneshot();
+    let completer = move |res| match sender.send(res) {
+        Ok(()) => {}
+        Err(_) => {
+            // TODO: Better errors
+            eprintln!("exceptional future ignored!");
+        }
+    };
+    spawn_with_completer(future, completer);
+    receiver
 }
 
-impl<F, T> SpawnFuture<F, T>
+// Returns a future
+type SubmitToCallFn = extern "C" fn(data: *mut c_void) -> *mut c_void;
+type SubmitToCleanupFn = extern "C" fn(data: *mut c_void);
+
+pub fn submit_to<T, F, Fun>(
+    target_shard: ShardId,
+    f: Fun,
+) -> impl Future<Output = Result<T, Box<dyn Any + Send>>>
+where
+    Fun: FnOnce() -> F + Send + 'static,
+    F: Future<Output = T>,
+    T: Send + 'static,
+{
+    assert!(target_shard < smp::shard_count());
+
+    extern "C" {
+        #[link_name = "seastar_rs_task_submit_to"]
+        fn impl_fn(
+            call_fn: SubmitToCallFn,
+            cleanup_fn: SubmitToCleanupFn,
+            data: *mut c_void,
+            shard: c_uint,
+        );
+    }
+
+    // Create a context object that will be shared between this thread and the other one.
+    // All synchronization is being done by seastar futures.
+    // The context is owned both by the `poll_fn` future and the fiber spawned by `submit_to`.
+    let ctx = Rc::new(SpawnRemoteRustContext {
+        cell: OneshotCell::new(),
+        value: Cell::new(None),
+        f: Cell::new(MaybeUninit::new(f)),
+    });
+    let ctx2 = Rc::into_raw(Rc::clone(&ctx)) as *mut SpawnRemoteRustContext<T, Fun> as *mut c_void;
+
+    // Call seastar::smp::submit_to. It will call `submit_to_call_fn` function on the remote shard, which will call
+    // the `f` function and create a task to poll it. After the task is polled to completion, `submit_to_cleanup_fn`
+    // will be called, but on the original shard - the latter will release the ownership of the shared context.
+    unsafe {
+        impl_fn(
+            submit_to_call_fn::<T, F, Fun>,
+            submit_to_cleanup_fn::<T, Fun>,
+            ctx2,
+            target_shard as c_uint,
+        );
+    }
+
+    std::future::poll_fn(move |cx| match ctx.cell.poll_recv(cx) {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Ok(())) => {
+            let v = ctx
+                .value
+                .take()
+                .expect("submit_to future polled after it was closed");
+            Poll::Ready(v)
+        }
+        Poll::Ready(Err(_)) => {
+            panic!("submit_to future polled after it was closed");
+        }
+    })
+}
+
+extern "C" fn submit_to_call_fn<T, F, Fun>(data: *mut c_void) -> *mut c_void
+where
+    Fun: FnOnce() -> F + Send + 'static,
+    F: Future<Output = T>,
+    T: Send + 'static,
+{
+    // Safety: cpp side makes sure that `ctx` is a valid pointer.
+    let ctx = data as *const SpawnRemoteRustContext<T, Fun>;
+    let value_cell = unsafe { &(*ctx).value };
+
+    // Safety: `ctx` is valid.
+    // This function is called only once for a given SpawnRemoteRustContext,
+    // so `f` was properly initialized before reaching this line.
+    let fun = unsafe { (*ctx).f.replace(MaybeUninit::uninit()).assume_init() };
+
+    let prom = BoxPromise::new();
+    let sfut = prom.get_future();
+
+    let future = async move { fun().await };
+    let completer = move |res| {
+        value_cell.set(Some(res));
+        prom.set_value(());
+    };
+
+    spawn_with_completer(future, completer);
+
+    BoxFuture::into_raw(sfut)
+}
+
+extern "C" fn submit_to_cleanup_fn<T, Fun>(data: *mut c_void) {
+    let ctx = unsafe { Rc::from_raw(data as *const SpawnRemoteRustContext<T, Fun>) };
+
+    // TODO: Warning about an ignored value
+    let _ = ctx.cell.send(());
+
+    // Explicitly drop the Rc to the context, decrementing its reference count
+    std::mem::drop(ctx);
+}
+
+/// A structure that contains data relevant to a submit_to call.
+/// It is kept alive by the handle returned from submit_to, and also
+/// the `.finally` call in `seastar_rs_task_submit_to`.
+struct SpawnRemoteRustContext<T, Fun> {
+    /// Used to synchronize on the calling shard.
+    cell: OneshotCell<()>,
+
+    /// Written by the remote shard, read by the calling shard.
+    /// Synchronization between threads is done by seastar - the local thread
+    /// waits for the future returned by smp::submit_to.
+    value: Cell<Option<Result<T, Box<dyn Any + Send>>>>,
+
+    /// A function used to create a `Fut` and then `SpawnRemoteRustFuture<T, Fut>`.
+    /// Initialzed on the calling shard, consumed on the remote shard.
+    f: Cell<MaybeUninit<Fun>>,
+}
+
+type FuturePollFn = extern "C" fn(task: *mut c_void, fut: *mut c_void) -> c_int;
+
+/// Spawns a task that polls a future which doesn't return anything.
+/// The task is not being waited on, it is the responsibility of the future
+/// being polled to synchronize with waiters.
+/// TODO: Adjust the comment
+fn spawn_with_completer<Fut, T, Completer>(future: Fut, completer: Completer)
+where
+    Fut: Future<Output = T> + 'static,
+    Completer: FnOnce(Result<T, Box<dyn Any + Send + 'static>>),
+{
+    extern "C" {
+        #[link_name = "seastar_rs_task_spawn"]
+        fn impl_fn(poll_fn: FuturePollFn, fut: *mut c_void);
+    }
+    let completer = Some(completer);
+    let future = SpawnFuture { future, completer };
+    let poller = poll_fn_of(&future);
+    let fut_holder = Box::new(future);
+    unsafe {
+        impl_fn(poller, Box::into_raw(fut_holder) as *mut _ as *mut _);
+    }
+}
+
+struct SpawnFuture<F, T, C>
 where
     F: Future<Output = T>,
-    T: BoxPromiseTarget,
+    C: FnOnce(Result<T, Box<dyn Any + Send + 'static>>),
+{
+    future: F,
+    completer: Option<C>,
+}
+
+impl<F, T, C> SpawnFuture<F, T, C>
+where
+    F: Future<Output = T>,
+    C: FnOnce(Result<T, Box<dyn Any + Send + 'static>>),
 {
     fn get_inner(self: Pin<&mut Self>) -> Pin<&mut F> {
         unsafe { self.map_unchecked_mut(|s| &mut s.future) }
     }
 
-    fn get_promise(self: Pin<&mut Self>) -> &mut BoxPromise<T> {
-        unsafe { &mut self.get_unchecked_mut().promise }
+    fn invoke_completer(self: Pin<&mut Self>, v: Result<T, Box<dyn Any + Send + 'static>>) {
+        let completer = match unsafe { &mut self.get_unchecked_mut().completer }.take() {
+            Some(completer) => completer,
+            None => {
+                eprintln!("fatal error: SpawnFuture polled after completion");
+                std::process::abort()
+            }
+        };
+        completer(v);
     }
 }
 
-impl<F, T> Future for SpawnFuture<F, T>
+impl<F, T, C> Future for SpawnFuture<F, T, C>
 where
     F: Future<Output = T>,
-    T: BoxPromiseTarget,
+    C: FnOnce(Result<T, Box<dyn Any + Send + 'static>>),
 {
     type Output = ();
 
@@ -64,41 +251,22 @@ where
         match poll_result {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(t)) => {
-                self.get_promise().set_value(t);
+                self.invoke_completer(Ok(t));
                 Poll::Ready(())
             }
-            Err(payload) => {
-                let eptr = CxxExceptionPtr::try_from_panic(payload)
-                    .unwrap_or_else(|payload| CxxExceptionPtr::panic_to_exception(payload));
-                self.get_promise().set_exception(eptr);
+            Err(e) => {
+                self.invoke_completer(Err(e));
                 Poll::Ready(())
             }
         }
     }
 }
 
-// TODO: Provide a version of spawn which works within rust and doesn't need the BoxFuture/BoxPromise shenanigans
-
-type FuturePollFn = extern "C" fn(task: *mut c_void, fut: *mut c_void) -> c_int;
-
-/// Spawns a task that polls a future which doesn't return anything.
-/// The task is not being waited on, it is the responsibility of the future
-/// being polled to synchronize with waiters.
-fn spawn_void<Fut>(fut: Fut)
+const fn poll_fn_of<Fut>(_: &Fut) -> FuturePollFn
 where
-    Fut: Future<Output = ()> + 'static,
+    Fut: Future<Output = ()>,
 {
-    extern "C" {
-        #[link_name = "seastar_rs_task_spawn"]
-        fn impl_fn(poll_fn: FuturePollFn, fut: *mut c_void);
-    }
-    let fut_holder = Box::new(fut);
-    unsafe {
-        impl_fn(
-            poll_fn::<Fut>,
-            Box::into_raw(fut_holder) as *mut _ as *mut _,
-        );
-    }
+    poll_fn::<Fut>
 }
 
 extern "C" fn poll_fn<Fut>(task: *mut c_void, fut: *mut c_void) -> c_int

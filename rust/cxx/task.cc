@@ -181,15 +181,15 @@ public:
 
     // Thread-safe
     inline void inc_ref() noexcept {
-        auto count = _ref_count.fetch_add(1, std::memory_order_relaxed);
-        tlogger.trace("Incremented reference count for {} to {}", fmt::ptr(this), count + 1);
+        auto old_count = _ref_count.fetch_add(1, std::memory_order_relaxed);
+        tlogger.trace("Incremented reference count for {} to {}", fmt::ptr(this), old_count + 1);
     }
 
     // Thread-safe
     inline void dec_ref() noexcept {
-        auto count = _ref_count.fetch_sub(1, std::memory_order_relaxed);
-        tlogger.trace("Decremented reference count for {} to {}", fmt::ptr(this), count - 1);
-        if (count == 1) {
+        auto old_count = _ref_count.fetch_sub(1, std::memory_order_relaxed);
+        tlogger.trace("Decremented reference count for {} to {}", fmt::ptr(this), old_count - 1);
+        if (old_count == 1) {
             call_on_origin_thread([this] () noexcept {
                 delete this;
             });
@@ -227,6 +227,28 @@ extern "C" {
 
 void seastar_rs_task_spawn(rust_future_poll_fn poll_fn, void* rust_future) {
     (new rust_task(poll_fn, rust_future))->run_and_dispose();
+}
+
+using rust_submit_to_call_fn = void* (*)(void* data) noexcept;
+using rust_submit_to_cleanup_fn = void (*)(void* data) noexcept;
+
+void* seastar_rs_task_submit_to(
+    rust_submit_to_call_fn call_fn,
+    rust_submit_to_cleanup_fn cleanup_fn,
+    void* data,
+    unsigned int shard
+) noexcept {
+    auto f = seastar::smp::submit_to(shard, [data, call_fn] () mutable noexcept {
+        auto* fut = reinterpret_cast<seastar::future<>*>(call_fn(data));
+        auto taken_fut = std::move(*fut);
+        delete fut;
+        return taken_fut;
+    }).finally([data, cleanup_fn] () mutable noexcept {
+        cleanup_fn(data);
+    });
+
+    // TODO: Prevent allocations from failing here
+    return new seastar::future<>(std::move(f));
 }
 
 void seastar_rs_waker_clone(void* data) {

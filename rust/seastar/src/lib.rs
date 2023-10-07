@@ -10,8 +10,12 @@ pub mod exception;
 pub mod future;
 pub mod promise;
 pub mod sched;
+pub mod sharded;
+pub mod smp;
 pub mod task;
 pub mod test;
+
+pub mod native;
 
 pub use future::BoxFuture;
 

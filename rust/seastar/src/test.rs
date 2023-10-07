@@ -15,6 +15,8 @@ mod ffi {
         include!("rust/cxx/promise.hh");
         include!("rust/seastar/idl/futures_promises_primitive.idl.hh");
 
+        #[cxx_name = "future_box_void"]
+        type BoxFutureUnit = crate::BoxFutureUnit;
         #[cxx_name = "future_box_bool"]
         type BoxFutureBool = crate::BoxFutureBool;
         #[cxx_name = "future_box_uint32_t"]
@@ -44,6 +46,8 @@ mod ffi {
         fn consume_panic(eptr: CxxExceptionPtr) -> String;
 
         fn test_exception_repackaging(f: BoxFutureBool) -> BoxFutureBool;
+
+        fn test_submit_to() -> BoxFutureUnit;
     }
 }
 
@@ -105,6 +109,18 @@ fn consume_panic(eptr: CxxExceptionPtr) -> String {
 
 #[crate::taskify(crate = crate)]
 async fn test_exception_repackaging(f: BoxFuture<bool>) -> bool {
-    f.await.eunwrap();
-    false
+    f.await.eunwrap()
+}
+
+#[crate::taskify(crate = crate)]
+async fn test_submit_to() {
+    assert!(crate::smp::shard_count() > 0);
+
+    for shard_id in 0..crate::smp::shard_count() {
+        let remote_shard_id =
+            crate::task::submit_to(shard_id, || async move { crate::smp::this_shard() })
+                .await
+                .unwrap();
+        assert_eq!(shard_id, remote_shard_id);
+    }
 }

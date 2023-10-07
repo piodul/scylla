@@ -50,6 +50,12 @@ where
             _phantom: PhantomData,
         }
     }
+
+    pub(crate) fn into_raw(me: Self) -> *mut c_void {
+        let ret = me.cpp_fut;
+        std::mem::forget(me); // Don't run the destructor
+        ret
+    }
 }
 
 /// Creates a new seastar future that is immediately ready.
