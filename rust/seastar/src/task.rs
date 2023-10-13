@@ -48,9 +48,8 @@ where
     sfut
 }
 
-pub type TaskHandle<T> = Receiver<Result<T, Box<dyn Any + Send>>>;
-
-pub fn spawn<T>(future: impl Future<Output = T> + 'static) -> TaskHandle<T>
+/// Spawns a task and returns a Rust future that can be used to wait on that task.
+pub fn spawn<T>(future: impl Future<Output = T> + 'static) -> impl Future<Output = T>
 where
     T: 'static,
 {
@@ -63,17 +62,19 @@ where
         }
     };
     spawn_with_completer(future, completer);
-    receiver
+    async move {
+        match receiver.await.unwrap() {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
 }
 
 // Returns a future
 type SubmitToCallFn = extern "C" fn(data: *mut c_void) -> *mut c_void;
 type SubmitToCleanupFn = extern "C" fn(data: *mut c_void);
 
-pub fn submit_to<T, F, Fun>(
-    target_shard: ShardId,
-    f: Fun,
-) -> impl Future<Output = Result<T, Box<dyn Any + Send>>>
+pub fn submit_to<T, F, Fun>(target_shard: ShardId, f: Fun) -> impl Future<Output = T>
 where
     Fun: FnOnce() -> F + Send + 'static,
     F: Future<Output = T>,
@@ -120,7 +121,10 @@ where
                 .value
                 .take()
                 .expect("submit_to future polled after it was closed");
-            Poll::Ready(v)
+            match v {
+                Ok(v) => Poll::Ready(v),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
         }
         Poll::Ready(Err(_)) => {
             panic!("submit_to future polled after it was closed");

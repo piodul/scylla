@@ -7,6 +7,7 @@
  */
 
 pub mod exception;
+pub mod foreign;
 pub mod future;
 pub mod promise;
 pub mod sched;

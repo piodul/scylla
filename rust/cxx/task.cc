@@ -247,7 +247,7 @@ void* seastar_rs_task_submit_to(
         cleanup_fn(data);
     });
 
-    // TODO: Prevent allocations from failing here
+    // TODO: Disable alloc error injection...?
     return new seastar::future<>(std::move(f));
 }
 

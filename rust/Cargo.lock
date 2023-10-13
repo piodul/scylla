@@ -880,6 +880,7 @@ name = "seastar"
 version = "0.1.0"
 dependencies = [
  "cxx",
+ "futures-util",
  "seastar-macros",
 ]
 

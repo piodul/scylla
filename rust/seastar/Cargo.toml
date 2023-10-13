@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 cxx = "1.0"
+futures-util = "0.3"
 seastar-macros = { path = "../seastar-macros", version = "0.1.0" }

@@ -1,3 +1,11 @@
+/*
+ * Copyright (C) 2023-present ScyllaDB
+ */
+
+/*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 use std::cell::UnsafeCell;
 use std::future::Future;
 use std::pin::Pin;

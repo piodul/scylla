@@ -119,8 +119,7 @@ async fn test_submit_to() {
     for shard_id in 0..crate::smp::shard_count() {
         let remote_shard_id =
             crate::task::submit_to(shard_id, || async move { crate::smp::this_shard() })
-                .await
-                .unwrap();
+                .await;
         assert_eq!(shard_id, remote_shard_id);
     }
 }
