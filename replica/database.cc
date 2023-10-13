@@ -2165,6 +2165,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     if (cl != nullptr && cf.durable_writes()) {
         std::exception_ptr ex;
         try {
+            tracing::trace(tr_state, "Calling commitlog::add_entry");
             commitlog_entry_writer cew(s, m, sync);
             auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(uuid, cew, timeout));
             if (!f_h.failed()) {
@@ -2185,6 +2186,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::exception(std::move(ex));
         }
     }
+    tracing::trace(tr_state, "Calling database::apply_in_memory");
     auto f = co_await coroutine::as_future(this->apply_in_memory(m, s, std::move(h), timeout));
     if (f.failed()) {
       auto ex = f.get_exception();
@@ -2231,6 +2233,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
     }
     if (timeout <= db::timeout_clock::now()) {
         update_write_metrics_for_timed_out_write();
+        tracing::trace(tr_state, "Write timed out before it was even started");
         return make_exception_future<>(timed_out_error{});
     }
     if (!s->is_synced()) {

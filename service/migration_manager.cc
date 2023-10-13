@@ -33,6 +33,8 @@
 #include "cql3/functions/user_aggregate.hh"
 #include "cql3/functions/user_function.hh"
 #include "cql3/functions/function_name.hh"
+#include "tracing/tracing.hh"
+#include "tracing/trace_state.hh"
 
 namespace service {
 
@@ -41,7 +43,7 @@ static logging::logger mlogger("migration_manager");
 using namespace std::chrono_literals;
 
 const std::chrono::milliseconds migration_manager::migration_delay = 60000ms;
-static future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, service::storage_proxy& sp);
+static future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, service::storage_proxy& sp, tracing::trace_state_ptr trace_state_ptr = nullptr);
 
 migration_manager::migration_manager(migration_notifier& notifier, gms::feature_service& feat, netw::messaging_service& ms,
             service::storage_proxy& storage_proxy, gms::gossiper& gossiper, service::raft_group0_client& group0_client, sharded<db::system_keyspace>& sysks) :
@@ -1095,8 +1097,9 @@ future<> migration_manager::maybe_sync(const schema_ptr& s, netw::messaging_serv
 
 // Returns schema of given version, either from cache or from remote node identified by 'from'.
 // Doesn't affect current node's schema in any way.
-static future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, service::storage_proxy& storage_proxy) {
-    return local_schema_registry().get_or_load(v, [&ms, &storage_proxy, dst] (table_schema_version v) {
+static future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, service::storage_proxy& storage_proxy, tracing::trace_state_ptr trace_state_ptr) {
+    return local_schema_registry().get_or_load(v, [&ms, &storage_proxy, dst, trace_state_ptr] (table_schema_version v) {
+        tracing::trace(trace_state_ptr, "Requesting schema {} from {}", v, dst);
         mlogger.debug("Requesting schema {} from {}", v, dst);
         return ms.send_get_schema_version(dst, v).then([&storage_proxy] (frozen_schema s) {
             auto& proxy = storage_proxy.container();
@@ -1141,7 +1144,7 @@ future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v
     return get_schema_for_write(v, dst, ms, as);
 }
 
-future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as) {
+future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as, tracing::trace_state_ptr trace_state_ptr) {
     if (_as.abort_requested()) {
         co_return coroutine::exception(std::make_exception_ptr(abort_requested_exception()));
     }
@@ -1149,6 +1152,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     auto s = local_schema_registry().get_or_null(v);
 
     if (s && s->is_synced()) {
+        tracing::trace(trace_state_ptr, "Schema is synced, no need to pull");
         co_return s;
     }
 
@@ -1159,6 +1163,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         // Schema is synchronized through Raft, so perform a group 0 read barrier.
         // Batch the barriers so we don't invoke them redundantly.
         mlogger.trace("Performing raft read barrier because schema is not synced, version: {}", v);
+        tracing::trace(trace_state_ptr, "Performing raft read barrier becaue schema is not synced, version: {}", v);
         co_await (as ? _group0_barrier.trigger(*as) : _group0_barrier.trigger());
     }
 
@@ -1167,8 +1172,10 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     if (use_raft) {
         // If Raft is used the schema is synced already (through barrier above), mark it as such.
         mlogger.trace("Mark schema {} as synced", v);
+        tracing::trace(trace_state_ptr, "Mark schema {} as synced", v);
         co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
     } else {
+        tracing::trace(trace_state_ptr, "Maybe will sync, I dunno");
         co_await maybe_sync(s, dst);
     }
 

@@ -492,17 +492,23 @@ private:
                 [&] () -> future<> {
                     try {
                         // FIXME: get_schema_for_write() doesn't timeout
+                        tracing::trace(trace_state_ptr, "Calling get_schema_for_write");
                         schema_ptr s = co_await get_schema_for_write(schema_version, netw::messaging_service::msg_addr{reply_to, shard}, timeout);
                         // Note: blocks due to execution_stage in replica::database::apply()
+                        tracing::trace(trace_state_ptr, "Calling apply_fn");
                         co_await apply_fn(p, trace_state_ptr, std::move(s), m, timeout, fence);
                         // We wait for send_mutation_done to complete, otherwise, if reply_to is busy, we will accumulate
                         // lots of unsent responses, which can OOM our shard.
                         //
                         // Usually we will return immediately, since this work only involves appending data to the connection
                         // send buffer.
+                        tracing::trace(trace_state_ptr, "Calling send_mutation_done");
                         auto f = co_await coroutine::as_future(send_mutation_done(netw::messaging_service::msg_addr{reply_to, shard}, trace_state_ptr,
                                 shard, response_id, p->get_view_update_backlog()));
-                        f.ignore_ready_future();
+                        if (f.failed()) {
+                            tracing::trace(trace_state_ptr, "Failed to issue send_mutation_done: {}", f.get_exception());
+                        }
+                        // f.ignore_ready_future();
                     } catch (...) {
                         std::exception_ptr eptr = std::current_exception();
                         errors.count++;
@@ -515,6 +521,7 @@ private:
                             // database's total_writes_timedout or total_writes_rate_limited counter was incremented.
                             l = seastar::log_level::debug;
                         }
+                        tracing::trace(trace_state_ptr, "Failed to apply mutation: {}", eptr);
                         slogger.log(l, "Failed to apply mutation from {}#{}: {}", reply_to, shard, eptr);
                     }
                 },
@@ -538,6 +545,7 @@ private:
         }
         // ignore results, since we'll be returning them via MUTATION_DONE/MUTATION_FAILURE verbs
         if (errors.count) {
+            tracing::trace(trace_state_ptr, "Responding with a failure");
             auto f = co_await coroutine::as_future(send_mutation_failed(
                     netw::messaging_service::msg_addr{reply_to, shard},
                     trace_state_ptr,
@@ -1346,7 +1354,9 @@ public:
             }
         } else {
             if (_error == error::TIMEOUT) {
-                _ready.set_value(mutation_write_timeout_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _total_block_for, _type));
+                auto e = mutation_write_timeout_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _total_block_for, _type);
+                slogger.warn("Write failed: {}; nodes that didn't respond: {}", e, _targets);
+                _ready.set_value(std::move(e));
             } else if (_error == error::FAILURE) {
                 if (!_message) {
                     _ready.set_exception(mutation_write_failure_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _failed, _total_block_for, _type));
