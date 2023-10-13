@@ -2114,7 +2114,7 @@ future<> database::do_apply_many(const std::vector<frozen_mutation>& muts, db::t
     }
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid) {
     ++_stats->total_writes;
     // assume failure until proven otherwise
     auto update_writes_failed = defer([&] { ++_stats->total_writes_failed; });
@@ -2165,7 +2165,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     if (cl != nullptr && cf.durable_writes()) {
         std::exception_ptr ex;
         try {
-            tracing::trace(tr_state, "Calling commitlog::add_entry");
+            dblog.debug("[{}] Calling commitlog::add_entry", request_uuid);
             commitlog_entry_writer cew(s, m, sync);
             auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(uuid, cew, timeout));
             if (!f_h.failed()) {
@@ -2186,7 +2186,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::exception(std::move(ex));
         }
     }
-    tracing::trace(tr_state, "Calling database::apply_in_memory");
+    dblog.debug("[{}] Calling commitlog::apply_in_memory", request_uuid);
     auto f = co_await coroutine::as_future(this->apply_in_memory(m, s, std::move(h), timeout));
     if (f.failed()) {
       auto ex = f.get_exception();
@@ -2227,19 +2227,19 @@ void database::update_write_metrics_for_timed_out_write() {
     ++_stats->total_writes_timedout;
 }
 
-future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info) {
+future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
     if (timeout <= db::timeout_clock::now()) {
         update_write_metrics_for_timed_out_write();
-        tracing::trace(tr_state, "Write timed out before it was even started");
+        dblog.trace("[{}] Write timed out before it was even started", request_uuid);
         return make_exception_future<>(timed_out_error{});
     }
     if (!s->is_synced()) {
         on_internal_error(dblog, format("attempted to apply mutation using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
     }
-    return _apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync, rate_limit_info);
+    return _apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync, rate_limit_info, request_uuid);
 }
 
 future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout) {
@@ -2250,7 +2250,7 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
         on_internal_error(dblog, format("attempted to apply hint using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
     }
     return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, tr_state = std::move(tr_state), timeout] () mutable {
-        return _apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no, std::monostate{});
+        return _apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no, std::monostate{}, utils::UUID{});
     });
 }
 

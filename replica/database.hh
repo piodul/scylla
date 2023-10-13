@@ -1403,7 +1403,8 @@ private:
             tracing::trace_state_ptr,
             db::timeout_clock::time_point,
             db::commitlog_force_sync,
-            db::per_partition_rate_limit::info> _apply_stage;
+            db::per_partition_rate_limit::info,
+            utils::UUID> _apply_stage;
 
     flat_hash_map<sstring, keyspace> _keyspaces;
     tables_metadata _tables_metadata;
@@ -1477,7 +1478,7 @@ private:
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
 
-    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync, db::per_partition_rate_limit::info rate_limit_info);
+    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid);
     future<> do_apply_many(const std::vector<frozen_mutation>&, db::timeout_clock::time_point timeout);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
@@ -1647,7 +1648,7 @@ public:
                                                 tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog_force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info = std::monostate{});
+    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog_force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info = std::monostate{}, utils::UUID request_uuid = utils::UUID{});
     // Apply mutations atomically.
     // On restart, either all mutations will be replayed or none of them.
     // All mutations must belong to the same commitlog domain.

@@ -401,9 +401,9 @@ private:
         co_return co_await _mm.get_schema_for_read(std::move(v), std::move(from), _ms, &aoe.abort_source());
     }
 
-    future<schema_ptr> get_schema_for_write(table_schema_version v, netw::msg_addr from, clock_type::time_point timeout) {
+    future<schema_ptr> get_schema_for_write(table_schema_version v, netw::msg_addr from, clock_type::time_point timeout, utils::UUID request_uuid = utils::UUID{}) {
         abort_on_expiry aoe(timeout);
-        co_return co_await _mm.get_schema_for_write(std::move(v), std::move(from), _ms, &aoe.abort_source());
+        co_return co_await _mm.get_schema_for_write(std::move(v), std::move(from), _ms, &aoe.abort_source(), request_uuid);
     }
 
     future<replica::exception_variant> handle_counter_mutation(
@@ -454,12 +454,18 @@ private:
 
         tracing::trace_state_ptr trace_state_ptr;
 
+        utils::UUID request_uuid;
         if (trace_info) {
             const tracing::trace_info& tr_info = *trace_info;
             trace_state_ptr = tracing::tracing::get_local_tracing_instance().create_session(tr_info);
             tracing::begin(trace_state_ptr);
             tracing::trace(trace_state_ptr, "Message received from /{}", src_addr.addr);
+            request_uuid = trace_state_ptr->session_id();
+        } else {
+            request_uuid = utils::UUID_gen::get_time_UUID();
         }
+
+        slogger.debug("[{}] Handling request from {}#{}, response_id: {}", request_uuid, reply_to, shard, response_id);
 
         auto trace_done = defer([&] {
             tracing::trace(trace_state_ptr, "Mutation handling is done");
@@ -492,21 +498,21 @@ private:
                 [&] () -> future<> {
                     try {
                         // FIXME: get_schema_for_write() doesn't timeout
-                        tracing::trace(trace_state_ptr, "Calling get_schema_for_write");
-                        schema_ptr s = co_await get_schema_for_write(schema_version, netw::messaging_service::msg_addr{reply_to, shard}, timeout);
+                        slogger.debug("[{}] Calling get_schema_for_write", request_uuid);
+                        schema_ptr s = co_await get_schema_for_write(schema_version, netw::messaging_service::msg_addr{reply_to, shard}, timeout, request_uuid);
                         // Note: blocks due to execution_stage in replica::database::apply()
-                        tracing::trace(trace_state_ptr, "Calling apply_fn");
-                        co_await apply_fn(p, trace_state_ptr, std::move(s), m, timeout, fence);
+                        slogger.debug("[{}] Calling apply_fn", request_uuid);
+                        co_await apply_fn(p, trace_state_ptr, std::move(s), m, timeout, fence, request_uuid);
                         // We wait for send_mutation_done to complete, otherwise, if reply_to is busy, we will accumulate
                         // lots of unsent responses, which can OOM our shard.
                         //
                         // Usually we will return immediately, since this work only involves appending data to the connection
                         // send buffer.
-                        tracing::trace(trace_state_ptr, "Calling send_mutation_done");
+                        slogger.debug("[{}] Calling send_mutation_done", request_uuid);
                         auto f = co_await coroutine::as_future(send_mutation_done(netw::messaging_service::msg_addr{reply_to, shard}, trace_state_ptr,
                                 shard, response_id, p->get_view_update_backlog()));
                         if (f.failed()) {
-                            tracing::trace(trace_state_ptr, "Failed to issue send_mutation_done: {}", f.get_exception());
+                            slogger.debug("[{}] Failed to issue send_mutation_done: {}", request_uuid, f.get_exception());
                         }
                         // f.ignore_ready_future();
                     } catch (...) {
@@ -521,7 +527,7 @@ private:
                             // database's total_writes_timedout or total_writes_rate_limited counter was incremented.
                             l = seastar::log_level::debug;
                         }
-                        tracing::trace(trace_state_ptr, "Failed to apply mutation: {}", eptr);
+                        slogger.debug("[{}] Failed to apply mutation: {}", request_uuid, eptr);
                         slogger.log(l, "Failed to apply mutation from {}#{}: {}", reply_to, shard, eptr);
                     }
                 },
@@ -545,7 +551,7 @@ private:
         }
         // ignore results, since we'll be returning them via MUTATION_DONE/MUTATION_FAILURE verbs
         if (errors.count) {
-            tracing::trace(trace_state_ptr, "Responding with a failure");
+            slogger.debug("[{}] Responding with a failure", request_uuid);
             auto f = co_await coroutine::as_future(send_mutation_failed(
                     netw::messaging_service::msg_addr{reply_to, shard},
                     trace_state_ptr,
@@ -575,8 +581,8 @@ private:
                 trace_info ? *trace_info : std::nullopt,
                 fence.value_or(fencing_token{}),
                 /* apply_fn */ [smp_grp, rate_limit_info, src_ip = src_addr.addr] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s, const frozen_mutation& m,
-                        clock_type::time_point timeout, fencing_token fence) {
-                    return p->apply_fence(p->mutate_locally(std::move(s), m, std::move(tr_state), db::commitlog::force_sync::no, timeout, smp_grp, rate_limit_info), fence, src_ip);
+                        clock_type::time_point timeout, fencing_token fence, utils::UUID request_uuid) {
+                    return p->apply_fence(p->mutate_locally(std::move(s), m, std::move(tr_state), db::commitlog::force_sync::no, timeout, smp_grp, rate_limit_info, request_uuid), fence, src_ip);
                 },
                 /* forward_fn */ [this, rate_limit_info] (shared_ptr<storage_proxy>& p, netw::messaging_service::msg_addr addr, clock_type::time_point timeout, const frozen_mutation& m,
                         gms::inet_address reply_to, unsigned shard, response_id_type response_id,
@@ -608,7 +614,7 @@ private:
                 response_id, trace_info,
                 fencing_token{},
                /* apply_fn */ [this] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s,
-                       const paxos::proposal& decision, clock_type::time_point timeout, fencing_token) {
+                       const paxos::proposal& decision, clock_type::time_point timeout, fencing_token, utils::UUID) {
                      return paxos::paxos_state::learn(*p, _sys_ks.local(), std::move(s), decision, timeout, tr_state);
               },
               /* forward_fn */ [this] (shared_ptr<storage_proxy>&, netw::messaging_service::msg_addr addr, clock_type::time_point timeout, const paxos::proposal& m,
@@ -1354,8 +1360,11 @@ public:
             }
         } else {
             if (_error == error::TIMEOUT) {
-                auto e = mutation_write_timeout_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _total_block_for, _type);
-                slogger.warn("Write failed: {}; nodes that didn't respond: {}", e, _targets);
+                // Awful hack: add some more information to the cf name
+                sstring cf_name = get_schema()->cf_name();
+                cf_name += format("_id{}", _id);
+                auto e = mutation_write_timeout_exception(get_schema()->ks_name(), std::move(cf_name), _cl, _cl_acks, _total_block_for, _type);
+                slogger.warn("Write failed: {}; nodes that didn't respond: {}, response_id: {}", e, _targets, _id);
                 _ready.set_value(std::move(e));
             } else if (_error == error::FAILURE) {
                 if (!_message) {
@@ -2912,7 +2921,7 @@ storage_proxy::response_id_type storage_proxy::unique_response_handler::release(
 }
 
 future<>
-storage_proxy::mutate_locally(const mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, clock_type::time_point timeout, smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info) {
+storage_proxy::mutate_locally(const mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, clock_type::time_point timeout, smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid) {
     auto erm = _db.local().find_column_family(m.schema()).get_effective_replication_map();
     auto shard = erm->get_sharder(*m.schema()).shard_of(m.token());
     get_stats().replica_cross_shard_ops += shard != this_shard_id();
@@ -2922,33 +2931,34 @@ storage_proxy::mutate_locally(const mutation& m, tracing::trace_state_ptr tr_sta
              gtr = tracing::global_trace_state_ptr(std::move(tr_state)),
              timeout,
              sync,
-             rate_limit_info] (replica::database& db) mutable -> future<> {
-        return db.apply(s, m, gtr.get(), sync, timeout, rate_limit_info);
+             rate_limit_info,
+             request_uuid] (replica::database& db) mutable -> future<> {
+        return db.apply(s, m, gtr.get(), sync, timeout, rate_limit_info, request_uuid);
     });
 }
 
 future<>
 storage_proxy::mutate_locally(const schema_ptr& s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, clock_type::time_point timeout,
-        smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info) {
+        smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid) {
     auto erm = _db.local().find_column_family(s).get_effective_replication_map();
     auto shard = erm->get_sharder(*s).shard_of(m.token(*s));
     get_stats().replica_cross_shard_ops += shard != this_shard_id();
     return _db.invoke_on(shard, {smp_grp, timeout},
-            [&m, gs = global_schema_ptr(s), gtr = tracing::global_trace_state_ptr(std::move(tr_state)), timeout, sync, rate_limit_info] (replica::database& db) mutable -> future<> {
-        return db.apply(gs, m, gtr.get(), sync, timeout, rate_limit_info);
+            [&m, gs = global_schema_ptr(s), gtr = tracing::global_trace_state_ptr(std::move(tr_state)), timeout, sync, rate_limit_info, request_uuid] (replica::database& db) mutable -> future<> {
+        return db.apply(gs, m, gtr.get(), sync, timeout, rate_limit_info, request_uuid);
     });
 }
 
 future<>
-storage_proxy::mutate_locally(std::vector<mutation> mutations, tracing::trace_state_ptr tr_state, clock_type::time_point timeout, smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info) {
+storage_proxy::mutate_locally(std::vector<mutation> mutations, tracing::trace_state_ptr tr_state, clock_type::time_point timeout, smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid) {
     co_await coroutine::parallel_for_each(mutations, [&] (const mutation& m) mutable {
-            return mutate_locally(m, tr_state, db::commitlog::force_sync::no, timeout, smp_grp, rate_limit_info);
+            return mutate_locally(m, tr_state, db::commitlog::force_sync::no, timeout, smp_grp, rate_limit_info, request_uuid);
     });
 }
 
 future<> 
-storage_proxy::mutate_locally(std::vector<mutation> mutation, tracing::trace_state_ptr tr_state, clock_type::time_point timeout, db::per_partition_rate_limit::info rate_limit_info) {
-        return mutate_locally(std::move(mutation), tr_state, timeout, _write_smp_service_group, rate_limit_info);
+storage_proxy::mutate_locally(std::vector<mutation> mutation, tracing::trace_state_ptr tr_state, clock_type::time_point timeout, db::per_partition_rate_limit::info rate_limit_info, utils::UUID request_uuid) {
+        return mutate_locally(std::move(mutation), tr_state, timeout, _write_smp_service_group, rate_limit_info, request_uuid);
 }
 future<>
 storage_proxy::mutate_hint(const schema_ptr& s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, clock_type::time_point timeout) {
