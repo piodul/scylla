@@ -465,7 +465,7 @@ private:
             request_uuid = utils::UUID_gen::get_time_UUID();
         }
 
-        slogger.debug("[{}] Handling request from {}#{}, response_id: {}", request_uuid, reply_to, shard, response_id);
+        slogger.debug("[{}] (tcnt:{}) Handling request from {}#{}, response_id: {}", request_uuid, engine().get_sched_stats().tasks_processed, reply_to, shard, response_id);
 
         auto trace_done = defer([&] {
             tracing::trace(trace_state_ptr, "Mutation handling is done");
@@ -497,24 +497,24 @@ private:
 
             co_await coroutine::all(
                 [&] () -> future<> {
-                    slogger.debug("[{}] coroutine::all: lambda #1", request_uuid);
+                    slogger.debug("[{}] (tcnt:{}) coroutine::all: lambda #1", request_uuid, engine().get_sched_stats().tasks_processed);
                     try {
                         // FIXME: get_schema_for_write() doesn't timeout
-                        slogger.debug("[{}] Calling get_schema_for_write", request_uuid);
+                        slogger.debug("[{}] (tcnt:{}) Calling get_schema_for_write", request_uuid, engine().get_sched_stats().tasks_processed);
                         schema_ptr s = co_await get_schema_for_write(schema_version, netw::messaging_service::msg_addr{reply_to, shard}, timeout, request_uuid);
                         // Note: blocks due to execution_stage in replica::database::apply()
-                        slogger.debug("[{}] Calling apply_fn", request_uuid);
+                        slogger.debug("[{}] (tcnt:{}) Calling apply_fn", request_uuid, engine().get_sched_stats().tasks_processed);
                         co_await apply_fn(p, trace_state_ptr, std::move(s), m, timeout, fence, request_uuid);
                         // We wait for send_mutation_done to complete, otherwise, if reply_to is busy, we will accumulate
                         // lots of unsent responses, which can OOM our shard.
                         //
                         // Usually we will return immediately, since this work only involves appending data to the connection
                         // send buffer.
-                        slogger.debug("[{}] Calling send_mutation_done", request_uuid);
+                        slogger.debug("[{}] (tcnt:{}) Calling send_mutation_done", request_uuid, engine().get_sched_stats().tasks_processed);
                         auto f = co_await coroutine::as_future(send_mutation_done(netw::messaging_service::msg_addr{reply_to, shard}, trace_state_ptr,
                                 shard, response_id, p->get_view_update_backlog()));
                         if (f.failed()) {
-                            slogger.debug("[{}] Failed to issue send_mutation_done: {}", request_uuid, f.get_exception());
+                            slogger.debug("[{}] (tcnt:{}) Failed to issue send_mutation_done: {}", request_uuid, engine().get_sched_stats().tasks_processed, f.get_exception());
                         }
                         // f.ignore_ready_future();
                     } catch (...) {
@@ -529,12 +529,12 @@ private:
                             // database's total_writes_timedout or total_writes_rate_limited counter was incremented.
                             l = seastar::log_level::debug;
                         }
-                        slogger.debug("[{}] Failed to apply mutation: {}", request_uuid, eptr);
+                        slogger.debug("[{}] (tcnt:{}) Failed to apply mutation: {}", request_uuid, engine().get_sched_stats().tasks_processed, eptr);
                         slogger.log(l, "Failed to apply mutation from {}#{}: {}", reply_to, shard, eptr);
                     }
                 },
                 [&] {
-                    slogger.debug("[{}] coroutine::all: lambda #2", request_uuid);
+                    slogger.debug("[{}] (tcnt:{}) coroutine::all: lambda #2", request_uuid, engine().get_sched_stats().tasks_processed);
                     // Note: not a coroutine, since often nothing needs to be forwarded and this returns a ready future
                     return parallel_for_each(forward.begin(), forward.end(), [&] (gms::inet_address forward) {
                         // Note: not a coroutine, since forward_fn() typically returns a ready future
@@ -554,7 +554,7 @@ private:
         }
         // ignore results, since we'll be returning them via MUTATION_DONE/MUTATION_FAILURE verbs
         if (errors.count) {
-            slogger.debug("[{}] Responding with a failure", request_uuid);
+            slogger.debug("[{}] (tcnt:{}) Responding with a failure", request_uuid, engine().get_sched_stats().tasks_processed);
             auto f = co_await coroutine::as_future(send_mutation_failed(
                     netw::messaging_service::msg_addr{reply_to, shard},
                     trace_state_ptr,

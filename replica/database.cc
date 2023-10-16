@@ -2165,7 +2165,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     if (cl != nullptr && cf.durable_writes()) {
         std::exception_ptr ex;
         try {
-            dblog.debug("[{}] Calling commitlog::add_entry", request_uuid);
+            dblog.debug("[{}] (tcnt:{}) Calling commitlog::add_entry", request_uuid, engine().get_sched_stats().tasks_processed);
             commitlog_entry_writer cew(s, m, sync);
             auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(uuid, cew, timeout));
             if (!f_h.failed()) {
@@ -2186,7 +2186,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::exception(std::move(ex));
         }
     }
-    dblog.debug("[{}] Calling commitlog::apply_in_memory", request_uuid);
+    dblog.debug("[{}] (tcnt:{}) Calling commitlog::apply_in_memory", request_uuid, engine().get_sched_stats().tasks_processed);
     auto f = co_await coroutine::as_future(this->apply_in_memory(m, s, std::move(h), timeout));
     if (f.failed()) {
       auto ex = f.get_exception();
@@ -2233,7 +2233,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
     }
     if (timeout <= db::timeout_clock::now()) {
         update_write_metrics_for_timed_out_write();
-        dblog.debug("[{}] Write timed out before it was even started", request_uuid);
+        dblog.debug("[{}] (tcnt:{}) Write timed out before it was even started", request_uuid, engine().get_sched_stats().tasks_processed);
         return make_exception_future<>(timed_out_error{});
     }
     if (!s->is_synced()) {

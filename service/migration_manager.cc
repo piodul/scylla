@@ -1099,7 +1099,7 @@ future<> migration_manager::maybe_sync(const schema_ptr& s, netw::messaging_serv
 // Doesn't affect current node's schema in any way.
 static future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, service::storage_proxy& storage_proxy, utils::UUID request_uuid) {
     return local_schema_registry().get_or_load(v, [&ms, &storage_proxy, dst, request_uuid] (table_schema_version v) {
-        mlogger.trace("[{}] Requesting schema {} from {}", request_uuid, v, dst);
+        mlogger.trace("[{}] (tcnt:{}) Requesting schema {} from {}", request_uuid, engine().get_sched_stats().tasks_processed, v, dst);
         // mlogger.debug("Requesting schema {} from {}", v, dst);
         return ms.send_get_schema_version(dst, v).then([&storage_proxy] (frozen_schema s) {
             auto& proxy = storage_proxy.container();
@@ -1152,7 +1152,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     auto s = local_schema_registry().get_or_null(v);
 
     if (s && s->is_synced()) {
-        mlogger.trace("[{}] Schema is synced, no need to pull", request_uuid);
+        mlogger.trace("[{}] (tcnt:{}) Schema is synced, no need to pull", request_uuid, engine().get_sched_stats().tasks_processed);
         co_return s;
     }
 
@@ -1163,7 +1163,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         // Schema is synchronized through Raft, so perform a group 0 read barrier.
         // Batch the barriers so we don't invoke them redundantly.
         // mlogger.trace("Performing raft read barrier because schema is not synced, version: {}", v);
-        mlogger.trace("[{}] Performing raft read barrier becaue schema is not synced, version: {}", request_uuid, v);
+        mlogger.trace("[{}] (tcnt:{}) Performing raft read barrier becaue schema is not synced, version: {}", request_uuid, engine().get_sched_stats().tasks_processed, v);
         co_await (as ? _group0_barrier.trigger(*as) : _group0_barrier.trigger());
     }
 
@@ -1172,10 +1172,10 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     if (use_raft) {
         // If Raft is used the schema is synced already (through barrier above), mark it as such.
         // mlogger.trace("Mark schema {} as synced", v);
-        mlogger.trace("[{}] Mark schema {} as synced", request_uuid, v);
+        mlogger.trace("[{}] (tcnt:{}) Mark schema {} as synced", request_uuid, engine().get_sched_stats().tasks_processed, v);
         co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
     } else {
-        mlogger.trace("[{}] Maybe will sync, I dunno", request_uuid);
+        mlogger.trace("[{}] (tcnt:{}) Maybe will sync, I dunno", request_uuid, engine().get_sched_stats().tasks_processed);
         co_await maybe_sync(s, dst);
     }
 
