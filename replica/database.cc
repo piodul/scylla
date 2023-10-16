@@ -2233,7 +2233,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
     }
     if (timeout <= db::timeout_clock::now()) {
         update_write_metrics_for_timed_out_write();
-        dblog.trace("[{}] Write timed out before it was even started", request_uuid);
+        dblog.debug("[{}] Write timed out before it was even started", request_uuid);
         return make_exception_future<>(timed_out_error{});
     }
     if (!s->is_synced()) {

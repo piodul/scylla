@@ -494,8 +494,10 @@ private:
             errors.count += (forward.size() + 1);
             errors.local = std::move(*stale);
         } else {
+
             co_await coroutine::all(
                 [&] () -> future<> {
+                    slogger.debug("[{}] coroutine::all: lambda #1", request_uuid);
                     try {
                         // FIXME: get_schema_for_write() doesn't timeout
                         slogger.debug("[{}] Calling get_schema_for_write", request_uuid);
@@ -532,6 +534,7 @@ private:
                     }
                 },
                 [&] {
+                    slogger.debug("[{}] coroutine::all: lambda #2", request_uuid);
                     // Note: not a coroutine, since often nothing needs to be forwarded and this returns a ready future
                     return parallel_for_each(forward.begin(), forward.end(), [&] (gms::inet_address forward) {
                         // Note: not a coroutine, since forward_fn() typically returns a ready future
