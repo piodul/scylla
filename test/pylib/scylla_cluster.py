@@ -414,7 +414,7 @@ class ScyllaServer:
         def status_string():
             s = f"server_id {self.server_id}, IP {self.ip_addr}, workdir {self.workdir.name}"
             s += f", host_id {self.host_id if hasattr(self, 'host_id') else '<missing>'}"
-            s += f", cql [{'connected' if cql_up_state == CqlUpState.CONNECTED else 'not connected'}]"
+            s += f", cql [{'connected' if cql_up_state == CqlUpState.CONNECTED else 'queried' if cql_up_state == CqlUpState.QUERIED else 'not connected'}]"
             return s
 
         def report_error(message: str):
