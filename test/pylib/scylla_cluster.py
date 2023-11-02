@@ -342,7 +342,7 @@ class ScyllaServer:
         caslog = logging.getLogger('cassandra')
         oldlevel = caslog.getEffectiveLevel()
         # Be quiet about connection failures.
-        caslog.setLevel('CRITICAL')
+        caslog.setLevel('DEBUG')
         auth = PlainTextAuthProvider(username='cassandra', password='cassandra')
         # auth::standard_role_manager creates "cassandra" role in an
         # async loop auth::do_after_system_ready(), which retries
