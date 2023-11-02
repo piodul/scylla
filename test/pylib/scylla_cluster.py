@@ -411,10 +411,14 @@ class ScyllaServer:
         sleep_interval = 0.1
         cql_up_state = CqlUpState.NOT_CONNECTED
 
+        def status_string():
+            s = f"server_id {self.server_id}, IP {self.ip_addr}, workdir {self.workdir.name}"
+            s += f", host_id {self.host_id if hasattr(self, 'host_id') else '<missing>'}"
+            s += f", cql [{'connected' if cql_up_state == CqlUpState.CONNECTED else 'not connected'}]"
+            return s
+
         def report_error(message: str):
-            message += f", server_id {self.server_id}, IP {self.ip_addr}, workdir {self.workdir.name}"
-            message += f", host_id {self.host_id if hasattr(self, 'host_id') else '<missing>'}"
-            message += f", cql [{'connected' if cql_up_state == CqlUpState.CONNECTED else 'not connected'}]"
+            message += ", " + status_string()
             if expected_error is not None:
                 message += f", the node log was expected to contain the string [{expected_error}]"
             self.logger.error(message)
@@ -427,6 +431,9 @@ class ScyllaServer:
             raise RuntimeError(message + "\nCheck the log files:\n"
                                          f"{logpath}\n"
                                          f"{self.log_filename}")
+
+        if hasattr(self, "host_id"):
+            self.logger.info(status_string() + ": already has host_id in self")
 
         while time.time() < self.start_time + self.TOPOLOGY_TIMEOUT:
             assert self.cmd is not None
@@ -445,7 +452,12 @@ class ScyllaServer:
                 if cql_up_state == CqlUpState.QUERIED:
                     if expected_error is not None:
                         report_error("the node started, but was expected to fail with the expected error")
+                    self.logger.info(status_string() + ": server successfully started")
                     return
+                else:
+                    self.logger.info(status_string() + ": node didn't start yet")
+            elif not hasattr(self, "host_id"):
+                self.logger.info(status_string() + ": did not get host_id yet")
 
             # Sleep and retry
             await asyncio.sleep(sleep_interval)
