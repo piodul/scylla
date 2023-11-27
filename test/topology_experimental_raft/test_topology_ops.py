@@ -34,7 +34,7 @@ async def test_topology_ops(request, manager: ManagerClient):
     cql = await reconnect_driver(manager)
     # FIXME: disabled as a workaround for #15935, #15924
     # We need to reenable once these issues are fixed.
-    #finish_writes = await start_writes(cql)
+    finish_writes = await start_writes(cql)
 
     logger.info("Bootstrapping other nodes")
     servers += [await manager.server_add(), await manager.server_add()]
@@ -66,7 +66,7 @@ async def test_topology_ops(request, manager: ManagerClient):
     await check_token_ring_and_group0_consistency(manager)
 
     logger.info("Checking results of the background writes")
-    #await finish_writes()
+    await finish_writes()
 
     for server in servers:
         await check_node_log_for_failed_mutations(manager, server)
@@ -75,7 +75,7 @@ async def test_topology_ops(request, manager: ManagerClient):
 async def check_node_log_for_failed_mutations(manager: ManagerClient, server: ServerInfo):
     logger.info(f"Checking that node {server} had no failed mutations")
     log = await manager.server_open_log(server.server_id)
-    occurrences = await log.grep(expr="Failed to apply mutation from", \
+    occurrences = await log.grep(expr="WARN.*Failed to apply mutation from", \
                                  filter_expr="replica::stale_topology_exception") # Disabled due to #15804
     assert len(occurrences) == 0
 

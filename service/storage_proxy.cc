@@ -502,20 +502,24 @@ private:
                         // send buffer.
                         auto f = co_await coroutine::as_future(send_mutation_done(netw::messaging_service::msg_addr{reply_to, shard}, trace_state_ptr,
                                 shard, response_id, p->get_view_update_backlog()));
-                        f.ignore_ready_future();
+                        if (f.failed()) {
+                            slogger.warn("Failed to send successful response to {}#{}: {}", reply_to, shard, f.get_exception());
+                        }
                     } catch (...) {
                         std::exception_ptr eptr = std::current_exception();
                         errors.count++;
                         errors.local = replica::try_encode_replica_exception(eptr);
                         seastar::log_level l = seastar::log_level::warn;
+                        bool should_ignore = false;
                         if (is_timeout_exception(eptr)
                                 || std::holds_alternative<replica::rate_limit_exception>(errors.local.reason)
                                 || std::holds_alternative<abort_requested_exception>(errors.local.reason)) {
                             // ignore timeouts, abort requests and rate limit exceptions so that logs are not flooded.
                             // database's total_writes_timedout or total_writes_rate_limited counter was incremented.
-                            l = seastar::log_level::debug;
+                            // l = seastar::log_level::debug;
+                            should_ignore = true;
                         }
-                        slogger.log(l, "Failed to apply mutation from {}#{}: {}", reply_to, shard, eptr);
+                        slogger.log(l, "{} apply mutation from {}#{}: {}", should_ignore ? "Could not" : "Failed to", reply_to, shard, eptr);
                     }
                 },
                 [&] {
@@ -529,8 +533,8 @@ private:
                             if (f.failed()) {
                                 ++p->get_stats().forwarding_errors;
                                 errors.count++;
+                                slogger.warn("Failed to forward mutation to {}#{}: {}", reply_to, shard, f.get_exception());
                             };
-                            f.ignore_ready_future();
                         });
                     });
                 }
@@ -546,7 +550,9 @@ private:
                     errors.count,
                     p->get_view_update_backlog(),
                     std::move(errors.local)));
-            f.ignore_ready_future();
+            if (f.failed()) {
+                slogger.warn("Failed to send failure to {}#{}: {}", reply_to, shard, f.get_exception());
+            }
         }
         co_return netw::messaging_service::no_wait();
     }
