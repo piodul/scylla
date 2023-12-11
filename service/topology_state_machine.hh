@@ -106,6 +106,15 @@ struct topology {
         tablet_migration,
     };
 
+    enum class upgrade_state: uint16_t {
+        not_upgraded,
+        build_coordinator_state,
+        final_global_barrier,
+        done,
+    };
+
+    upgrade_state ustate = upgrade_state::not_upgraded;
+
     std::optional<transition_state> tstate;
 
     using version_t = int64_t;
@@ -232,4 +241,6 @@ topology_request topology_request_from_string(const sstring& s);
 std::ostream& operator<<(std::ostream&, const global_topology_request&);
 global_topology_request global_topology_request_from_string(const sstring&);
 std::ostream& operator<<(std::ostream& os, const raft_topology_cmd::command& cmd);
+topology::upgrade_state upgrade_state_from_string(const sstring&);
+std::ostream& operator<<(std::ostream& os, topology::upgrade_state cmd);
 }

@@ -686,6 +686,7 @@ public:
     topology_mutation_builder& set_new_cdc_generation_data_uuid(const utils::UUID& value);
     topology_mutation_builder& set_unpublished_cdc_generations(const std::vector<cdc::generation_id_v2>& values);
     topology_mutation_builder& set_global_topology_request(global_topology_request);
+    topology_mutation_builder& set_upgrade_state(topology::upgrade_state);
     template<typename S>
     requires std::constructible_from<sstring, S>
     topology_mutation_builder& add_enabled_features(const std::set<S>& value);
@@ -882,6 +883,10 @@ topology_mutation_builder& topology_mutation_builder::set_unpublished_cdc_genera
 
 topology_mutation_builder& topology_mutation_builder::set_global_topology_request(global_topology_request value) {
     return apply_atomic("global_topology_request", ::format("{}", value));
+}
+
+topology_mutation_builder& topology_mutation_builder::set_upgrade_state(topology::upgrade_state value) {
+    return apply_atomic("upgrade_state", ::format("{}", value));
 }
 
 template<typename S>

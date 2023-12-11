@@ -214,4 +214,40 @@ std::ostream& operator<<(std::ostream& os, const raft_topology_cmd::command& cmd
     }
     return os;
 }
+
+static std::unordered_map<topology::upgrade_state, sstring> upgrade_state_to_name_map = {
+    {topology::upgrade_state::not_upgraded, "not_upgraded"},
+    {topology::upgrade_state::build_coordinator_state, "build_coordinator_state"},
+    {topology::upgrade_state::final_global_barrier, "final_global_barrier"},
+    {topology::upgrade_state::done, "done"},
+};
+
+std::ostream& operator<<(std::ostream& os, topology::upgrade_state cmd) {
+    switch (cmd) {
+        case topology::upgrade_state::not_upgraded:
+            os << "not_upgraded";
+            break;
+        case topology::upgrade_state::build_coordinator_state:
+            os << "build_coordinator_state";
+            break;
+        case topology::upgrade_state::final_global_barrier:
+            os << "final_global_barrier";
+            break;
+        case topology::upgrade_state::done:
+            os << "done";
+            break;
+    }
+    return os;
+}
+
+topology::upgrade_state upgrade_state_from_string(const sstring& s) {
+    for (auto&& e : upgrade_state_to_name_map) {
+        if (e.second == s) {
+            return e.first;
+        }
+    }
+
+    on_internal_error(tsmlogger, format("cannot map name {} to upgrade_state", s));
+}
+
 }
