@@ -12,7 +12,6 @@ use utils::Uuid;
 mod ffi {
     #[namespace = "seastar::rs::generated"]
     extern "C++" {
-        #[cxx_name = "future_box_void"]
         type BoxFutureUnit = seastar::BoxFutureUnit;
     }
 

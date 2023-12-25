@@ -19,14 +19,10 @@ mod ffi {
         include!("rust/cxx/promise.hh");
         include!("rust/seastar/idl/futures_promises_primitive.idl.hh");
 
-        #[cxx_name = "future_box_void"]
         type BoxFutureUnit = crate::BoxFutureUnit;
-        #[cxx_name = "future_box_bool"]
         type BoxFutureBool = crate::BoxFutureBool;
-        #[cxx_name = "future_box_uint32_t"]
         type BoxFutureU32 = crate::BoxFutureU32;
 
-        #[cxx_name = "promise_box_bool"]
         type BoxPromiseBool = crate::BoxPromiseBool;
     }
 

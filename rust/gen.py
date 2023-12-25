@@ -19,6 +19,9 @@ import textwrap
 import yaml
 
 
+CURRENT_YEAR = 2023
+
+
 def get_seastar_crate_path(y):
     if "internal" in y and y["internal"] is True:
         return "crate"
@@ -51,7 +54,7 @@ def license():
     # The syntax works both for Rust and C++
     print(textwrap.dedent(f'''\
         /*
-        * Copyright (C) 2023-present ScyllaDB
+        * Copyright (C) {CURRENT_YEAR}-present ScyllaDB
         */
 
         /*
@@ -112,7 +115,7 @@ def generate_rust_futures_promises(y):
             }}
 
             unsafe impl ::cxx::ExternType for {crate}::future::BoxFuture<{rust}> {{
-                type Id = ::cxx::type_id!(seastar::rs::generated::future_box_{escaped_cpp});
+                type Id = ::cxx::type_id!(seastar::rs::generated::{future_alias});
                 type Kind = ::cxx::kind::Trivial;
             }}
 
@@ -174,7 +177,7 @@ def generate_rust_futures_promises(y):
             }}
 
             unsafe impl ::cxx::ExternType for {crate}::promise::BoxPromise<{rust}> {{
-                type Id = ::cxx::type_id!(seastar::rs::generated::promise_box_{escaped_cpp});
+                type Id = ::cxx::type_id!(seastar::rs::generated::{promise_alias});
                 type Kind = ::cxx::kind::Trivial;
             }}
 
@@ -194,6 +197,14 @@ def generate_cpp_futures_promises_header(y):
         escaped_cpp = escape_cpp_type(cpp)
         print(f"using future_box_{escaped_cpp} = ::seastar::rs::future_box<{cpp}>;")
         print(f"using promise_box_{escaped_cpp} = ::seastar::rs::promise_box<{cpp}>;")
+
+        # These names don't follow the seastar naming convention, but having them
+        # makes it much easier to import in rust code via a cxx bridge.
+        rust = item["rust"]
+        future_alias = "BoxFuture" + fix_name_for_rust(rust)
+        promise_alias = "BoxPromise" + fix_name_for_rust(rust)
+        print(f"using {future_alias} = ::seastar::rs::future_box<{cpp}>;")
+        print(f"using {promise_alias} = ::seastar::rs::promise_box<{cpp}>;")
     print(f"}} // namespace seastar::rs::generated")
 
 
