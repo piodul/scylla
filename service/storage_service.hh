@@ -781,6 +781,13 @@ public:
     // Public for `reload_raft_topology_state` REST API.
     future<> topology_transition();
 
+    // Starts the upgrade procedure to topology on raft.
+    // Must be called on shard 0.
+    future<> start_upgrade_to_raft_topology();
+
+    // Must be called on shard 0.
+    topology::upgrade_state get_topology_upgrade_state() const;
+
 private:
     // Tracks progress of the upgrade to topology coordinator.
     future<> track_upgrade_progress_to_topology_coordinator(sharded<db::system_distributed_keyspace>& sys_dist_ks);
