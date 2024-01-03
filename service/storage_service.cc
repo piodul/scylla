@@ -1110,6 +1110,59 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
     co_await _sys_ks.local().set_must_synchronize_topology(false);
 }
 
+future<> storage_service::start_upgrade_to_raft_topology() {
+    assert(this_shard_id() == 0);
+
+    if ((co_await _group0->client().get_group0_upgrade_state()).second != group0_upgrade_state::use_post_raft_procedures) {
+        throw std::runtime_error("Upgrade to schema-on-raft didn't complete yet. It is a prerequisite for starting "
+                "upgrade to raft topology. Refusing to continue.");
+    }
+
+    if (!_feature_service.supports_consistent_topology_changes) {
+        throw std::runtime_error("The SUPPORTS_CONSISTENT_TOPOLOGY_CHANGES feature is not enabled yet. "
+                "Not all nodes in the cluster might support topology on raft yet. Refusing to continue.");
+    }
+
+    if (auto unreachable = _gossiper.get_unreachable_token_owners(); !unreachable.empty()) {
+        throw std::runtime_error(format(
+            "Nodes {} are seen as down. All nodes must be alive in order to start the upgrade. "
+            "Refusing to continue.",
+            unreachable));
+    }
+
+    while (true) {
+        auto guard = co_await _group0->client().start_operation(&_group0_as);
+
+        if (_topology_state_machine._topology.ustate == topology::upgrade_state::done) {
+            throw std::runtime_error("The cluster is already upgraded to use topology on raft.");
+        } else if (_topology_state_machine._topology.ustate != topology::upgrade_state::not_upgraded) {
+            throw std::runtime_error("The upgrade has already started and is in progress.");
+        }
+
+        slogger.info("raft topology: requesting to start upgrade to topology on raft");
+        topology_mutation_builder builder(guard.write_timestamp());
+        builder.set_upgrade_state(topology::upgrade_state::build_coordinator_state);
+        topology_change change{{builder.build()}};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, "upgrade: start");
+
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), &_group0_as);
+            break;
+        } catch (group0_concurrent_modification&) {
+            slogger.info("raft topology: upgrade: concurrent operation is detected, retrying.");
+            continue;
+        }
+    }
+
+    slogger.info("raft topology: upgrade to topology on raft is scheduled");
+    co_return;
+}
+
+topology::upgrade_state storage_service::get_topology_upgrade_state() const {
+    assert(this_shard_id() == 0);
+    return _topology_state_machine._topology.ustate;
+}
+
 future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<service::storage_proxy>& proxy,
         sharded<gms::gossiper>& gossiper,
