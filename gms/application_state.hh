@@ -38,6 +38,7 @@ enum class application_state {
     IGNORE_MSB_BITS,
     CDC_GENERATION_ID,
     SNITCH_NAME,
+    USES_RAFT_TOPOLOGY_OPS,
 };
 
 std::ostream& operator<<(std::ostream& os, const application_state& m);

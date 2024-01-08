@@ -169,6 +169,10 @@ public:
         return versioned_value(snitch_name);
     }
 
+    static versioned_value uses_raft_topology_ops(bool value) {
+        return versioned_value(value ? "true" : "false");
+    }
+
     static versioned_value shard_count(int shard_count) {
         return versioned_value(format("{}", shard_count));
     }
