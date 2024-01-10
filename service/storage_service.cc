@@ -1282,7 +1282,6 @@ class topology_coordinator {
     // have tons of data, so indeed streaming/repair will take much longer (hours/days)).
     future<std::tuple<utils::UUID, group0_guard, canonical_mutation>> prepare_and_broadcast_cdc_generation_data(
             locator::token_metadata_ptr tmptr, group0_guard guard, std::optional<bootstrapping_info> binfo) {
-
         auto get_sharding_info_for_host_id = [&] (locator::host_id ep) -> std::pair<size_t, uint8_t> {
             auto ptr = _topo_sm._topology.find(raft::server_id{ep.uuid()});
             if (!ptr) {
@@ -1295,7 +1294,14 @@ class topology_coordinator {
             return {rs.shard_count, rs.ignore_msb};
         };
 
-        auto [gen_uuid, gen_mutations] = co_await prepare_new_cdc_generation_data(tmptr, guard, binfo, get_sharding_info_for_host_id);
+        co_return co_await prepare_and_broadcast_cdc_generation_data(tmptr, std::move(guard), binfo, get_sharding_info_for_host_id);
+    }
+
+    future<std::tuple<utils::UUID, group0_guard, canonical_mutation>> prepare_and_broadcast_cdc_generation_data(
+            locator::token_metadata_ptr tmptr, group0_guard guard, std::optional<bootstrapping_info> binfo,
+            noncopyable_function<std::pair<size_t, uint8_t>(locator::host_id)> get_sharding_info_for_host_id) {
+
+        auto [gen_uuid, gen_mutations] = co_await prepare_new_cdc_generation_data(tmptr, guard, binfo, std::move(get_sharding_info_for_host_id));
 
         if (gen_mutations.empty()) {
             on_internal_error(slogger, "cdc_generation_data: gen_mutations is empty");
