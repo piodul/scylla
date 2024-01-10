@@ -1221,7 +1221,8 @@ class topology_coordinator {
     // If there's a bootstrapping node, its tokens should be included in the new generation.
     // Pass them and a reference to the bootstrapping node's replica_state through `binfo`.
     future<std::pair<utils::UUID, utils::chunked_vector<mutation>>> prepare_new_cdc_generation_data(
-            locator::token_metadata_ptr tmptr, const group0_guard& guard, std::optional<bootstrapping_info> binfo) {
+            locator::token_metadata_ptr tmptr, const group0_guard& guard, std::optional<bootstrapping_info> binfo,
+            noncopyable_function<std::pair<size_t, uint8_t>(locator::host_id)> get_sharding_info_for_host_id) {
         auto get_sharding_info = [&] (dht::token end) -> std::pair<size_t, uint8_t> {
             if (binfo && binfo->bootstrap_tokens.contains(end)) {
                 return {binfo->rs.shard_count, binfo->rs.ignore_msb};
@@ -1235,15 +1236,13 @@ class topology_coordinator {
                         " can't find endpoint for token {}", end));
                 }
 
-                auto ptr = _topo_sm._topology.find(raft::server_id{ep->uuid()});
-                if (!ptr) {
-                    on_internal_error(slogger, ::format(
+                try {
+                    return get_sharding_info_for_host_id(*ep);
+                } catch (...) {
+                    std::throw_with_nested(std::runtime_error(::format(
                         "raft topology: make_new_cdc_generation_data: get_sharding_info:"
-                        " couldn't find node {} in topology, owner of token {}", *ep, end));
+                        " can't get sharding info for node {}, owner of token {}", *ep, end)));
                 }
-
-                auto& rs = ptr->second;
-                return {rs.shard_count, rs.ignore_msb};
             }
         };
 
@@ -1283,7 +1282,20 @@ class topology_coordinator {
     // have tons of data, so indeed streaming/repair will take much longer (hours/days)).
     future<std::tuple<utils::UUID, group0_guard, canonical_mutation>> prepare_and_broadcast_cdc_generation_data(
             locator::token_metadata_ptr tmptr, group0_guard guard, std::optional<bootstrapping_info> binfo) {
-        auto [gen_uuid, gen_mutations] = co_await prepare_new_cdc_generation_data(tmptr, guard, binfo);
+
+        auto get_sharding_info_for_host_id = [&] (locator::host_id ep) -> std::pair<size_t, uint8_t> {
+            auto ptr = _topo_sm._topology.find(raft::server_id{ep.uuid()});
+            if (!ptr) {
+                throw std::runtime_error(::format(
+                        "raft topology: prepare_and_broadcast_cdc_generation_data: get_sharding_info_for_host_id:"
+                        " couldn't find node {} in topology", ep));
+            }
+
+            auto& rs = ptr->second;
+            return {rs.shard_count, rs.ignore_msb};
+        };
+
+        auto [gen_uuid, gen_mutations] = co_await prepare_new_cdc_generation_data(tmptr, guard, binfo, get_sharding_info_for_host_id);
 
         if (gen_mutations.empty()) {
             on_internal_error(slogger, "cdc_generation_data: gen_mutations is empty");
