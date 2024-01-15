@@ -3663,6 +3663,38 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     assert(_group0);
     co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), _raft_topology_change_enabled);
     co_await _cdc_gens.local().after_join(std::move(cdc_gen_id));
+
+    // Waited on during _stop
+    (void)with_gate(_async_gate, [this, &sys_dist_ks] {
+        return track_upgrade_progress_to_topology_coordinator(sys_dist_ks);
+    }).handle_exception_type([] (const abort_requested_exception&) {});
+}
+
+future<> storage_service::track_upgrade_progress_to_topology_coordinator(sharded<db::system_distributed_keyspace>& sys_dist_ks) {
+    _abort_source.check();
+    auto cv_bumper = _abort_source.subscribe([this] () noexcept { _topology_state_machine.event.broadcast(); });
+
+    // First, wait for the feature to become enabled
+    shared_promise<> p;
+    _feature_service.supports_consistent_topology_changes.when_enabled([&] () noexcept { p.set_value(); });
+    co_await p.get_shared_future(_abort_source);
+    slogger.info("raft topology: The cluster is ready to start upgrade to the raft topology. The procedure needs to be manually triggered. Refer to the documentation");
+
+    // Wait until upgrade is started
+    co_await _topology_state_machine.event.when([this] {
+        return !_legacy_topology_change_enabled || _abort_source.abort_requested();
+    });
+    slogger.info("raft topology: upgrade to raft topology has started");
+
+    // Start the topology coordinator monitor fiber. If we are the leader, this will start
+    // the topology coordinator which is responsible for driving the upgrade process.
+    _raft_state_monitor = raft_state_monitor_fiber(_group0->group0_server(), sys_dist_ks);
+
+    // Wait until upgrade is finished
+    co_await _topology_state_machine.event.when([this] {
+        return _raft_topology_change_enabled || _abort_source.abort_requested();
+    });
+    slogger.info("raft topology: upgrade to raft topology has finished");
 }
 
 future<> storage_service::mark_existing_views_as_built() {
