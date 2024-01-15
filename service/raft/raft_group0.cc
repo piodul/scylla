@@ -157,6 +157,7 @@ void raft_group0::init_rpc_verbs(raft_group0& shard0_this) {
             });
         });
 
+    // TODO: reject this verb after upgrade to raft topology completes
     ser::group0_rpc_verbs::register_group0_modify_config(&shard0_this._ms.local(),
         [&shard0_this] (const rpc::client_info&, rpc::opt_time_point, raft::group_id gid, std::vector<raft::config_member> add, std::vector<raft::server_id> del) {
             return smp::submit_to(0, [&shard0_this, gid, add = std::move(add), del = std::move(del)]() mutable {
