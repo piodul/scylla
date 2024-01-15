@@ -808,6 +808,11 @@ public:
     future<> topology_transition();
 
     future<> do_cluster_cleanup();
+
+private:
+    // Tracks progress of the upgrade to topology coordinator.
+    future<> track_upgrade_progress_to_topology_coordinator(sharded<db::system_distributed_keyspace>& sys_dist_ks);
+
 public:
     future<> move_tablet(table_id, dht::token, locator::tablet_replica src, locator::tablet_replica dst);
     future<> set_tablet_balancing_enabled(bool);
