@@ -735,6 +735,7 @@ private:
 
     friend class group0_state_machine;
     bool _raft_topology_change_enabled = false;
+    bool _legacy_topology_change_enabled = true;
     future<> _raft_state_monitor = make_ready_future<>();
     // This fibers monitors raft state and start/stops the topology change
     // coordinator fiber

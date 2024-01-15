@@ -4421,6 +4421,7 @@ future<> storage_service::drain_on_shutdown() {
 void storage_service::set_group0(raft_group0& group0, bool raft_topology_change_enabled) {
     _group0 = &group0;
     _raft_topology_change_enabled = raft_topology_change_enabled;
+    _legacy_topology_change_enabled = !raft_topology_change_enabled;
 }
 
 future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy) {
