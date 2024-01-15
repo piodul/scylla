@@ -359,13 +359,21 @@ future<> storage_service::topology_state_load() {
     running = true;
 #endif
 
-    if (!_raft_topology_change_enabled) {
-        co_return;
+    slogger.debug("raft topology: reload raft topology state");
+    // read topology state from disk
+    _topology_state_machine._topology = co_await _sys_ks.local().load_topology_state();
+
+    if (_topology_state_machine._topology.ustate != topology::upgrade_state::not_upgraded) {
+        // Advertise this as soon as we notice that the upgrade has started.
+        // This will prevent joining nodes from trying to use legacy operations.
+        co_await _gossiper.add_local_application_state({{ gms::application_state::USES_RAFT_TOPOLOGY_OPS, gms::versioned_value::uses_raft_topology_ops(true) }});
+    } else {
+        co_await _gossiper.add_local_application_state({{ gms::application_state::USES_RAFT_TOPOLOGY_OPS, gms::versioned_value::uses_raft_topology_ops(false) }});
     }
 
-    slogger.debug("raft topology: reload raft topology state");
-    // read topology state from disk and recreate token_metadata from it
-    _topology_state_machine._topology = co_await _sys_ks.local().load_topology_state();
+    if (_topology_state_machine._topology.ustate != topology::upgrade_state::done) {
+        co_return;
+    }
 
     co_await _feature_service.container().invoke_on_all([&] (gms::feature_service& fs) {
         return fs.enable(boost::copy_range<std::set<std::string_view>>(_topology_state_machine._topology.enabled_features));
@@ -2648,7 +2656,7 @@ future<bool> topology_coordinator::do_upgrade_step(group0_guard guard) {
         co_return true;
 
     case topology::upgrade_state::final_global_barrier: {
-        slogger.info("raft topology: upgrade complete, performing a global barrier before continuing");
+        slogger.info("raft topology: performing a global barrier as a last step of the upgrade");
         guard = co_await exec_global_command(std::move(guard),
                 raft_topology_cmd{raft_topology_cmd::command::barrier},
                 {_raft.id()});
@@ -3175,12 +3183,29 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
     co_await _sys_ks.local().set_must_synchronize_topology(false);
 }
 
+static bool should_use_raft_topology_verbs(gms::gossiper& gossiper, const std::unordered_set<gms::inet_address>& initial_contact_nodes) {
+    if (utils::get_local_injector().is_enabled("force_gossip_based_join")) {
+        return false;
+    }
+    for (const auto ep : initial_contact_nodes) {
+        const auto state = gossiper.get_endpoint_state_ptr(ep);
+        if (state) {
+            const auto it = state->get_application_state_map().find(gms::application_state::USES_RAFT_TOPOLOGY_OPS);
+            if (it != state->get_application_state_map().end() && it->second.value() == "true") {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<service::storage_proxy>& proxy,
         std::unordered_set<gms::inet_address> initial_contact_nodes,
         std::unordered_set<gms::inet_address> loaded_endpoints,
         std::unordered_map<gms::inet_address, sstring> loaded_peer_features,
-        std::chrono::milliseconds delay) {
+        std::chrono::milliseconds delay,
+        bool experimental_raft_enabled) {
     std::unordered_set<token> bootstrap_tokens;
     gms::application_state_map app_states;
     /* The timestamp of the CDC streams generation that this node has proposed when joining.
@@ -3213,11 +3238,15 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     std::optional<raft_group0::replace_info> raft_replace_info;
     auto tmlock = std::make_unique<token_metadata_lock>(co_await get_token_metadata_lock());
     auto tmptr = co_await get_mutable_token_metadata_ptr();
+    bool use_raft_topology_verbs = (_topology_state_machine._topology.ustate != topology::upgrade_state::not_upgraded || is_first_node())
+            && experimental_raft_enabled
+            && !utils::get_local_injector().is_enabled("force_gossip_based_join");
     if (is_replacing()) {
         if (_sys_ks.local().bootstrap_complete()) {
             throw std::runtime_error("Cannot replace address with a node that is already bootstrapped");
         }
         ri = co_await prepare_replacement_info(initial_contact_nodes, loaded_peer_features);
+        use_raft_topology_verbs |= ri->use_raft_topology_verbs && experimental_raft_enabled;
         replace_address = ri->address;
         raft_replace_info = raft_group0::replace_info {
             .ip_addr = *replace_address,
@@ -3225,7 +3254,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         };
         replacing_a_node_with_same_ip = *replace_address == get_broadcast_address();
         replacing_a_node_with_diff_ip = *replace_address != get_broadcast_address();
-        if (!_raft_topology_change_enabled) {
+        if (!use_raft_topology_verbs) {
             bootstrap_tokens = std::move(ri->tokens);
 
             slogger.info("Replacing a node with {} IP address, my address={}, node being replaced={}",
@@ -3239,12 +3268,13 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
             replaced_host_id = ri->host_id;
         }
     } else if (should_bootstrap()) {
-        co_await check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features);
+        use_raft_topology_verbs |= co_await check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features) && experimental_raft_enabled;
     } else {
         auto local_features = _feature_service.supported_feature_set();
         slogger.info("Performing gossip shadow round, initial_contact_nodes={}", initial_contact_nodes);
         co_await _gossiper.do_shadow_round(initial_contact_nodes, gms::gossiper::mandatory::no);
-        if (!_raft_topology_change_enabled) {
+        use_raft_topology_verbs |= experimental_raft_enabled && should_use_raft_topology_verbs(_gossiper, initial_contact_nodes);
+        if (!use_raft_topology_verbs) {
             _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
         }
         _gossiper.check_snitch_name_matches(_snitch.local()->get_name());
@@ -3272,7 +3302,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     // If this is a restarting node, we should update tokens before gossip starts
     auto my_tokens = co_await _sys_ks.local().get_saved_tokens();
     bool restarting_normal_node = _sys_ks.local().bootstrap_complete() && !is_replacing() && !my_tokens.empty();
-    if (restarting_normal_node) {
+    if (restarting_normal_node) { // TODO: should the following logic be skipped in raft mode?
         slogger.info("Restarting a node in NORMAL status");
         // This node must know about its chosen tokens before other nodes do
         // since they may start sending writes to this node after it gossips status = NORMAL.
@@ -3334,12 +3364,13 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         app_states.emplace(gms::application_state::CDC_GENERATION_ID, versioned_value::cdc_generation_id(cdc_gen_id));
         app_states.emplace(gms::application_state::STATUS, versioned_value::normal(my_tokens));
     }
-    if (!_raft_topology_change_enabled && (replacing_a_node_with_same_ip || replacing_a_node_with_diff_ip)) {
+    if (!use_raft_topology_verbs && (replacing_a_node_with_same_ip || replacing_a_node_with_diff_ip)) {
         app_states.emplace(gms::application_state::TOKENS, versioned_value::tokens(bootstrap_tokens));
     }
     app_states.emplace(gms::application_state::SNITCH_NAME, versioned_value::snitch_name(_snitch.local()->get_name()));
     app_states.emplace(gms::application_state::SHARD_COUNT, versioned_value::shard_count(smp::count));
     app_states.emplace(gms::application_state::IGNORE_MSB_BITS, versioned_value::ignore_msb_bits(_db.local().get_config().murmur3_partitioner_ignore_msb_bits()));
+    app_states.emplace(gms::application_state::USES_RAFT_TOPOLOGY_OPS, versioned_value::uses_raft_topology_ops(use_raft_topology_verbs));
 
     for (auto&& s : _snitch.local()->get_app_states()) {
         app_states.emplace(s.first, std::move(s.second));
@@ -3357,7 +3388,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     auto advertise = gms::advertise_myself(!replacing_a_node_with_same_ip);
     co_await _gossiper.start_gossiping(generation_number, app_states, advertise);
 
-    if (!_raft_topology_change_enabled && should_bootstrap()) {
+    if (!use_raft_topology_verbs && should_bootstrap()) {
         // Wait for NORMAL state handlers to finish for existing nodes now, so that connection dropping
         // (happening at the end of `handle_state_normal`: `notify_joined`) doesn't interrupt
         // group 0 joining or repair. (See #12764, #12956, #12972, #13302)
@@ -3425,18 +3456,20 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     }
 
     // if the node is bootstrapped the function will do nothing since we already created group0 in main.cc
-    ::shared_ptr<group0_handshaker> handshaker = _raft_topology_change_enabled
+    ::shared_ptr<group0_handshaker> handshaker = use_raft_topology_verbs
             ? ::make_shared<join_node_rpc_handshaker>(*this, join_params)
             : _group0->make_legacy_handshaker(false);
     co_await _group0->setup_group0(_sys_ks.local(), initial_contact_nodes, std::move(handshaker),
-            raft_replace_info, *this, _qp, _migration_manager.local(), _raft_topology_change_enabled);
+            raft_replace_info, *this, _qp, _migration_manager.local(), experimental_raft_enabled);
 
-    raft::server* raft_server = co_await [this] () -> future<raft::server*> {
-        if (!_raft_topology_change_enabled) {
+    raft::server* raft_server = co_await [this, use_raft_topology_verbs] () -> future<raft::server*> {
+        // TODO(piodul): change
+        if (!use_raft_topology_verbs) {
+            // The cluster didn't start upgrade to raft topology yet - so use the legacy path
             co_return nullptr;
         } else if (_sys_ks.local().bootstrap_complete()) {
-            auto [upgrade_lock_holder, upgrade_state] = co_await _group0->client().get_group0_upgrade_state();
-            co_return upgrade_state == group0_upgrade_state::use_post_raft_procedures ? &_group0->group0_server() : nullptr;
+
+            co_return _legacy_topology_change_enabled ? nullptr : &_group0->group0_server();
         } else {
             auto upgrade_state = (co_await _group0->client().get_group0_upgrade_state()).second;
             if (upgrade_state != group0_upgrade_state::use_post_raft_procedures) {
@@ -3448,7 +3481,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
 
     co_await _gossiper.wait_for_gossip_to_settle();
     // TODO: Look at the group 0 upgrade state and use it to decide whether to attach or not
-    if (!_raft_topology_change_enabled) {
+    if (!use_raft_topology_verbs) {
         co_await _feature_service.enable_features_on_join(_gossiper, _sys_ks.local());
     }
 
@@ -3503,7 +3536,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
             throw std::runtime_error(err);
         }
 
-        co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), _raft_topology_change_enabled);
+        co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), experimental_raft_enabled);
         co_return;
     }
 
@@ -3661,7 +3694,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     }
 
     assert(_group0);
-    co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), _raft_topology_change_enabled);
+    co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), experimental_raft_enabled);
     co_await _cdc_gens.local().after_join(std::move(cdc_gen_id));
 
     // Waited on during _stop
@@ -4450,13 +4483,12 @@ future<> storage_service::drain_on_shutdown() {
         _drain_finished.get_future() : do_drain();
 }
 
-void storage_service::set_group0(raft_group0& group0, bool raft_topology_change_enabled) {
+void storage_service::set_group0(raft_group0& group0) {
     _group0 = &group0;
-    _raft_topology_change_enabled = raft_topology_change_enabled;
-    _legacy_topology_change_enabled = !raft_topology_change_enabled;
 }
 
-future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy) {
+future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy,
+        bool experimental_raft_enabled) {
     assert(this_shard_id() == 0);
 
     set_mode(mode::STARTING);
@@ -4526,7 +4558,7 @@ future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>&
     for (auto& x : loaded_peer_features) {
         slogger.info("peer={}, supported_features={}", x.first, x.second);
     }
-    co_return co_await join_token_ring(sys_dist_ks, proxy, std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay());
+    co_return co_await join_token_ring(sys_dist_ks, proxy, std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay(), experimental_raft_enabled);
 }
 
 future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept {
@@ -4683,17 +4715,19 @@ future<> storage_service::wait_for_group0_stop() {
     co_await std::move(_raft_state_monitor);
 }
 
-future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features) {
+future<bool> storage_service::check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features) {
     slogger.debug("Starting shadow gossip round to check for endpoint collision");
 
     return seastar::async([this, initial_contact_nodes, loaded_peer_features] {
         auto t = gms::gossiper::clk::now();
         bool found_bootstrapping_node = false;
+        bool uses_raft_topology;
         auto local_features = _feature_service.supported_feature_set();
         do {
             slogger.info("Performing gossip shadow round");
             _gossiper.do_shadow_round(initial_contact_nodes, gms::gossiper::mandatory::yes).get();
-            if (!_raft_topology_change_enabled) {
+            uses_raft_topology = should_use_raft_topology_verbs(_gossiper, initial_contact_nodes);
+            if (!uses_raft_topology) {
                 _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
             }
             _gossiper.check_snitch_name_matches(_snitch.local()->get_name());
@@ -4704,7 +4738,7 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
             }
             if (_db.local().get_config().consistent_rangemovement() &&
                 // Raft is responsible for consistency, so in case it is enable no need to check here
-                !_raft_topology_change_enabled) {
+                !uses_raft_topology) {
                 found_bootstrapping_node = false;
                 for (const auto& addr : _gossiper.get_endpoints()) {
                     auto state = _gossiper.get_gossip_status(addr);
@@ -4731,6 +4765,7 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
         } while (found_bootstrapping_node);
         slogger.info("Checking bootstrapping/leaving/moving nodes: ok (check_for_endpoint_collision)");
         _gossiper.reset_endpoint_state_map().get();
+        return uses_raft_topology;
     });
 }
 
@@ -4771,7 +4806,8 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
     // make magic happen
     slogger.info("Performing gossip shadow round");
     co_await _gossiper.do_shadow_round(initial_contact_nodes, gms::gossiper::mandatory::yes);
-    if (!_raft_topology_change_enabled) {
+    const bool use_raft_topology_verbs = should_use_raft_topology_verbs(_gossiper, initial_contact_nodes);
+    if (!use_raft_topology_verbs) {
         auto local_features = _feature_service.supported_feature_set();
         _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
     }
@@ -4800,7 +4836,7 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
     }
 
     std::unordered_set<dht::token> tokens;
-    if (!_raft_topology_change_enabled) {
+    if (!use_raft_topology_verbs) {
         tokens = get_tokens_for(replace_address);
         if (tokens.empty()) {
             throw std::runtime_error(::format("Could not find tokens for {} to replace", replace_address));
@@ -4820,6 +4856,7 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
         .dc_rack = std::move(dc_rack),
         .host_id = std::move(replace_host_id),
         .address = replace_address,
+        .use_raft_topology_verbs = use_raft_topology_verbs,
     };
 }
 

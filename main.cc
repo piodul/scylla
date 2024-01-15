@@ -1721,7 +1721,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             load_address_map(sys_ks.local(), raft_address_map.local()).get();
 
             // Set up group0 service earlier since it is needed by group0 setup just below
-            ss.local().set_group0(group0_service, raft_topology_change_enabled);
+            ss.local().set_group0(group0_service);
 
             // Need to make sure storage service does not use group0 before running group0_service.abort()
             auto stop_group0_usage_in_storage_service = defer_verbose_shutdown("group 0 usage in local storage", [&ss] {
@@ -1739,7 +1739,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }).get();
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
-                return ss.local().join_cluster(sys_dist_ks, proxy);
+                return ss.local().join_cluster(sys_dist_ks, proxy, raft_topology_change_enabled);
             }).get();
 
             sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {

@@ -889,14 +889,14 @@ private:
             const bool raft_topology_change_enabled =
                     cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES);
 
-            _ss.local().set_group0(group0_service, raft_topology_change_enabled);
+            _ss.local().set_group0(group0_service);
 
             auto stop_group0_usage_in_storage_service = defer([this] {
                 _ss.local().wait_for_group0_stop().get();
             });
 
             try {
-                _ss.local().join_cluster(_sys_dist_ks, _proxy).get();
+                _ss.local().join_cluster(_sys_dist_ks, _proxy, raft_topology_change_enabled).get();
             } catch (std::exception& e) {
                 // if any of the defers crashes too, we'll never see
                 // the error
