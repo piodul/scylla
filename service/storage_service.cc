@@ -3920,7 +3920,7 @@ future<> storage_service::handle_state_normal(inet_address endpoint, gms::permit
     slogger.debug("endpoint={} handle_state_normal: permit_id={}", endpoint, pid);
 
     if (_raft_topology_change_enabled) {
-        slogger.debug("ignore handle_state_normal since topology changes are using raft");
+        slogger.debug("ignore handle_state_normal since topology changes are using raft (state={})", _topology_state_machine._topology.ustate);
         co_return;
     }
 
@@ -4160,7 +4160,7 @@ future<> storage_service::handle_state_left(inet_address endpoint, std::vector<s
     slogger.debug("endpoint={} handle_state_left: permit_id={}", endpoint, pid);
 
     if (_raft_topology_change_enabled) {
-        slogger.debug("ignore handle_state_left since topology changes are using raft");
+        slogger.debug("ignore handle_state_left since topology changes are using raft (state={})", _topology_state_machine._topology.ustate);
         co_return;
     }
 
