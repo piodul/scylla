@@ -3052,7 +3052,7 @@ future<> storage_service::decommission() {
             std::exception_ptr leave_group0_ex;
             if (ss.raft_topology_change_enabled()) {
                 ss.raft_decommission().get();
-            } else {
+            } else if (ss.legacy_topology_change_enabled()) {
                 bool left_token_ring = false;
                 auto uuid = node_ops_id::create_random_id();
                 auto& db = ss._db.local();
@@ -3174,6 +3174,8 @@ future<> storage_service::decommission() {
                         uuid, std::current_exception());
                     leave_group0_ex = std::current_exception();
                 }
+            } else {
+                throw std::runtime_error("decommission not allowed at this time");
             }
 
             ss.stop_transport().get();
@@ -3405,6 +3407,8 @@ future<> storage_service::removenode(locator::host_id host_id, std::list<locator
             if (ss.raft_topology_change_enabled()) {
                 ss.raft_removenode(host_id, std::move(ignore_nodes_params)).get();
                 return;
+            } else if (!ss.legacy_topology_change_enabled()) {
+                throw std::runtime_error("removenode not allowed at this time");
             }
             node_ops_ctl ctl(ss, node_ops_cmd::removenode_prepare, host_id, gms::inet_address());
             auto stop_ctl = deferred_stop(ctl);
@@ -3537,9 +3541,11 @@ future<> storage_service::check_and_repair_cdc_streams() {
 
     if (raft_topology_change_enabled()) {
         return raft_check_and_repair_cdc_streams();
+    } else if (legacy_topology_change_enabled()) {
+        return _cdc_gens.local().check_and_repair_cdc_streams();
+    } else {
+        throw std::runtime_error("checkAndRepairCdcStreams not allowed at this time");
     }
-
-    return _cdc_gens.local().check_and_repair_cdc_streams();
 }
 
 class node_ops_meta_data {
@@ -4101,7 +4107,7 @@ future<> storage_service::rebuild(sstring source_dc) {
     return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) -> future<> {
         if (ss.raft_topology_change_enabled()) {
             co_await ss.raft_rebuild(source_dc);
-        } else {
+        } else if (ss.legacy_topology_change_enabled()) {
             slogger.info("rebuild from dc: {}", source_dc == "" ? "(any dc)" : source_dc);
             auto tmptr = ss.get_token_metadata_ptr();
             if (ss.is_repair_based_node_ops_enabled(streaming::stream_reason::rebuild)) {
@@ -4127,6 +4133,8 @@ future<> storage_service::rebuild(sstring source_dc) {
                     std::rethrow_exception(std::move(ep));
                 }
             }
+        } else {
+            throw std::runtime_error("rebuild not allowed at this time");
         }
     });
 }
@@ -5202,6 +5210,29 @@ future<> storage_service::set_tablet_balancing_enabled(bool enabled) {
 future<join_node_request_result> storage_service::join_node_request_handler(join_node_request_params params) {
     join_node_request_result result;
     rtlogger.info("received request to join from host_id: {}", params.host_id);
+
+    if (legacy_topology_change_enabled()) {
+        result.result = join_node_request_result::rejected{
+            .reason = "The cluster is using legacy topology operation "
+                    "and did not start upgrading to raft based topology yet",
+        };
+        co_return result;
+    }
+
+    if (!raft_topology_change_enabled()) {
+        slogger.info("raft topology: upgrade to raft topology is in progress, "
+                "deferring processing of the request from {} to join until upgrade completes",
+                params.host_id);
+
+        auto sub = _group0_as.subscribe([this] () noexcept { _topology_state_machine.event.broadcast(); });
+        while (_group0_as.abort_requested() && !raft_topology_change_enabled()) {
+            co_await _topology_state_machine.event.when();
+        }
+
+        if (_group0_as.abort_requested()) {
+            throw abort_requested_exception();
+        }
+    }
 
     if (params.cluster_name != _db.local().get_config().cluster_name()) {
         result.result = join_node_request_result::rejected{
