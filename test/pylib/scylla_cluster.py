@@ -797,8 +797,14 @@ class ScyllaCluster:
         """Add multiple servers to the cluster concurrently"""
         assert servers_num > 0, f"add_servers: cannot add {servers_num} servers"
 
-        return await asyncio.gather(*(self.add_server(None, cmdline, config, property_file, start, expected_error)
-                                      for _ in range(servers_num)))
+        res = []
+        for _ in range(servers_num):
+            res.append(await self.add_server(None, cmdline, config, property_file, start, expected_error))
+
+        return res
+
+        # return await asyncio.gather(*(self.add_server(None, cmdline, config, property_file, start, expected_error)
+        #                               for _ in range(servers_num)))
 
     def endpoint(self) -> str:
         """Get a server id (IP) from running servers"""

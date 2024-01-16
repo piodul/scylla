@@ -889,7 +889,7 @@ private:
             const bool raft_topology_change_enabled =
                     cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES);
 
-            _ss.local().set_group0(group0_service);
+            _ss.local().set_group0(group0_service, raft_topology_change_enabled);
 
             auto stop_group0_usage_in_storage_service = defer([this] {
                 _ss.local().wait_for_group0_stop().get();

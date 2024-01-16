@@ -11,14 +11,15 @@ import operator
 import pytest
 import time
 
+from cassandra.cluster import Session # type: ignore # pylint: disable=no-name-in-module
 from cassandra.pool import Host # type: ignore # pylint: disable=no-name-in-module
 
 from test.pylib.manager_client import ManagerClient
 from test.pylib.util import wait_for_cql_and_get_hosts, wait_for
 from test.topology.util import reconnect_driver, restart, enter_recovery_state, \
-        delete_raft_data_and_upgrade_state, log_run_time
+        delete_raft_data_and_upgrade_state, log_run_time, wait_until_upgrade_finishes as wait_until_schema_upgrade_finishes
 
-async def wait_until_upgrade_finishes(manager: ManagerClient, ip_addr: str, deadline: float):
+async def wait_until_topology_upgrade_finishes(manager: ManagerClient, ip_addr: str, deadline: float):
     async def check():
         status = await manager.api.raft_topology_upgrade_status(ip_addr)
         return status == "done" or None
@@ -66,26 +67,84 @@ async def check_system_topology_and_cdc_generations_v3_consistency(manager: Mana
     all_generations = frozenset(row.id for row in cdc_res)
     assert topo_res[0].current_cdc_generation_uuid in all_generations
 
+# @pytest.mark.asyncio
+# @log_run_time
+# async def test_topology_upgrade_basic(request, manager: ManagerClient):
+#     # First, create a cluster in legacy mode
+#     cfg = {'enable_user_defined_functions': False,
+#            'experimental_features': ['consistent-topology-changes'],
+#            'error_injections_at_startup': ['force_gossip_based_join']}
+#     servers = [await manager.server_add(config=cfg) for _ in range(3)]
+#     cql = manager.cql
+#     assert(cql)
+
+#     # Disable injections for the subsequent nodes
+#     del cfg['error_injections_at_startup']
+
+#     logging.info("Waiting until driver connects to every server")
+#     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+
+#     logging.info(f"Restarting hosts {hosts} with experimental topology on raft enabled")
+#     # TODO: Apparently, entering recovery state doesn't work - fix it
+#     # await asyncio.gather(*(enter_recovery_state(cql, h) for h in hosts))
+#     await asyncio.gather(*(restart(manager, srv) for srv in servers))
+#     cql = await reconnect_driver(manager)
+
+#     logging.info("Cluster restarted, waiting until driver reconnects to every server")
+#     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+#     logging.info(f"Driver reconnected, hosts: {hosts}")
+
+#     logging.info("Checking the upgrade state on all nodes")
+#     for host in hosts:
+#         status = await manager.api.raft_topology_upgrade_status(host.address)
+#         assert status == "not_upgraded"
+
+#     logging.info("Waiting until all nodes see others as alive")
+#     await asyncio.gather(*(manager.server_sees_others(srv.server_id, len(servers) - 1) for srv in servers))
+
+#     logging.info("Triggering upgrade to raft topology")
+#     await manager.api.upgrade_to_raft_topology(hosts[0].address)
+
+#     # TODO: Check that trying to trigger this again fails
+
+#     logging.info("Waiting until upgrade finishes")
+#     await asyncio.gather()
+
+#     logging.info(f"Cluster restarted, waiting until driver reconnects to every server")
+#     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+
+#     logging.info(f"Driver reconnected, hosts: {hosts}. Waiting until upgrade finishes")
+#     await asyncio.gather(*(wait_until_topology_upgrade_finishes(manager, h.address, time.time() + 60) for h in hosts))
+
+#     logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
+#     await asyncio.gather(*(check_system_topology_and_cdc_generations_v3_consistency(manager, h) for h in hosts))
+
+#     logging.info("Booting new node")
+#     await manager.server_add(config=cfg)
+
+#     logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
+#     await asyncio.gather(*(check_system_topology_and_cdc_generations_v3_consistency(manager, h) for h in hosts))
+
+
+async def delete_raft_topology_state(cql: Session, host: Host):
+    await cql.run_async("truncate table system.topology", host=host)
+
+
 @pytest.mark.asyncio
 @log_run_time
-async def test_topology_upgrade_basic(request, manager: ManagerClient):
+async def test_topology_recovery_basic(request, manager: ManagerClient):
     # First, create a cluster in legacy mode
     cfg = {'enable_user_defined_functions': False,
-           'experimental_features': ['consistent-topology-changes'],
-           'error_injections_at_startup': ['force_gossip_based_join']}
+           'experimental_features': ['consistent-topology-changes']}
     servers = [await manager.server_add(config=cfg) for _ in range(3)]
     cql = manager.cql
     assert(cql)
 
-    # Disable injections for the subsequent nodes
-    del cfg['error_injections_at_startup']
-
     logging.info("Waiting until driver connects to every server")
     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
-    logging.info(f"Restarting hosts {hosts} with experimental topology on raft enabled")
-    # TODO: Apparently, entering recovery state doesn't work - fix it
-    # await asyncio.gather(*(enter_recovery_state(cql, h) for h in hosts))
+    logging.info(f"Restarting hosts {hosts} in recovery mode")
+    await asyncio.gather(*(enter_recovery_state(cql, h) for h in hosts))
     await asyncio.gather(*(restart(manager, srv) for srv in servers))
     cql = await reconnect_driver(manager)
 
@@ -93,27 +152,34 @@ async def test_topology_upgrade_basic(request, manager: ManagerClient):
     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
     logging.info(f"Driver reconnected, hosts: {hosts}")
 
-    logging.info("Checking the upgrade state on all nodes")
+    logging.info(f"Deleting Raft data and upgrade state on {hosts}")
+    await asyncio.gather(*(delete_raft_topology_state(cql, h) for h in hosts))
+    await asyncio.gather(*(delete_raft_data_and_upgrade_state(cql, h) for h in hosts))
+
+    logging.info(f"Restarting hosts {hosts}")
+    await asyncio.gather(*(restart(manager, srv) for srv in servers))
+    cql = await reconnect_driver(manager)
+
+    logging.info("Cluster restarted, waiting until driver reconnects to every server")
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+    logging.info(f"Driver reconnected, hosts: {hosts}")
+
+    logging.info("Waiting until all nodes see others as alive")
+    await asyncio.gather(*(manager.server_sees_others(srv.server_id, len(servers) - 1, time.time() + 60) for srv in servers))
+
+    logging.info(f"Driver reconnected, hosts: {hosts}. Waiting until upgrade to raft schema finishes")
+    await asyncio.gather(*(wait_until_schema_upgrade_finishes(cql, h, time.time() + 60) for h in hosts))
+
+    logging.info("Checking the topology upgrade state on all nodes")
     for host in hosts:
         status = await manager.api.raft_topology_upgrade_status(host.address)
         assert status == "not_upgraded"
 
-    logging.info("Waiting until all nodes see others as alive")
-    await asyncio.gather(*(manager.server_sees_others(srv.server_id, len(servers) - 1) for srv in servers))
-
     logging.info("Triggering upgrade to raft topology")
     await manager.api.upgrade_to_raft_topology(hosts[0].address)
 
-    # TODO: Check that trying to trigger this again fails
-
-    logging.info("Waiting until upgrade finishes")
-    await asyncio.gather()
-
-    logging.info(f"Cluster restarted, waiting until driver reconnects to every server")
-    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
-
     logging.info(f"Driver reconnected, hosts: {hosts}. Waiting until upgrade finishes")
-    await asyncio.gather(*(wait_until_upgrade_finishes(manager, h.address, time.time() + 60) for h in hosts))
+    await asyncio.gather(*(wait_until_topology_upgrade_finishes(manager, h.address, time.time() + 60) for h in hosts))
 
     logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
     await asyncio.gather(*(check_system_topology_and_cdc_generations_v3_consistency(manager, h) for h in hosts))

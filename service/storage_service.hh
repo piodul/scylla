@@ -315,7 +315,6 @@ private:
         locator::endpoint_dc_rack dc_rack;
         locator::host_id host_id;
         gms::inet_address address;
-        bool use_raft_topology_verbs;
     };
     future<replacement_info> prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes,
             const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features);
@@ -329,13 +328,13 @@ public:
 
     static std::unordered_set<gms::inet_address> parse_node_list(sstring comma_separated_list, const locator::token_metadata& tm);
 
-    future<bool> check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes,
+    future<> check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes,
             const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features);
 
     future<> join_cluster(sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy,
             bool experimental_raft_enabled);
 
-    void set_group0(service::raft_group0&);
+    void set_group0(service::raft_group0&, bool experimental_raft_enabled);
 
     future<> drain_on_shutdown();
 
@@ -737,6 +736,7 @@ private:
     future<> wait_for_normal_state_handled_on_boot();
 
     friend class group0_state_machine;
+    bool _experimental_raft = false;
     bool _raft_topology_change_enabled = false;
     bool _legacy_topology_change_enabled = true;
     future<> _raft_state_monitor = make_ready_future<>();
@@ -773,6 +773,8 @@ private:
     future<> raft_rebuild(sstring source_dc);
     future<> raft_check_and_repair_cdc_streams();
     future<> update_topology_with_local_metadata(raft::server&);
+
+    void maybe_enable_raft_topology_after_shadow_round(const std::unordered_set<gms::inet_address>& initial_contact_nodes);
 
 public:
     // This is called on all nodes for each new command received through raft
