@@ -367,6 +367,7 @@ future<> storage_service::topology_state_load() {
         // Advertise this as soon as we notice that the upgrade has started.
         // This will prevent joining nodes from trying to use legacy operations.
         co_await _gossiper.add_local_application_state({{ gms::application_state::USES_RAFT_TOPOLOGY_OPS, gms::versioned_value::uses_raft_topology_ops(true) }});
+        _legacy_topology_change_enabled = false;
     } else {
         co_await _gossiper.add_local_application_state({{ gms::application_state::USES_RAFT_TOPOLOGY_OPS, gms::versioned_value::uses_raft_topology_ops(false) }});
     }
@@ -374,6 +375,8 @@ future<> storage_service::topology_state_load() {
     if (_topology_state_machine._topology.ustate != topology::upgrade_state::done) {
         co_return;
     }
+
+    _raft_topology_change_enabled = true;
 
     co_await _feature_service.container().invoke_on_all([&] (gms::feature_service& fs) {
         return fs.enable(boost::copy_range<std::set<std::string_view>>(_topology_state_machine._topology.enabled_features));
