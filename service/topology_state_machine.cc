@@ -295,9 +295,30 @@ cleanup_status cleanup_status_from_string(const sstring& s) {
     throw std::runtime_error(fmt::format("cannot map name {} to cleanup_status", s));
 }
 
+static std::unordered_map<topology::upgrade_state, sstring> upgrade_state_to_name_map = {
+    {topology::upgrade_state::not_upgraded, "not_upgraded"},
+    {topology::upgrade_state::build_coordinator_state, "build_coordinator_state"},
+    {topology::upgrade_state::final_global_barrier, "final_global_barrier"},
+    {topology::upgrade_state::done, "done"},
+};
+
+topology::upgrade_state upgrade_state_from_string(const sstring& s) {
+    for (auto&& e : upgrade_state_to_name_map) {
+        if (e.second == s) {
+            return e.first;
+        }
+    }
+    on_internal_error(tsmlogger, format("cannot map name {} to upgrade_state", s));
+}
+
 }
 
 auto fmt::formatter<service::cleanup_status>::format(service::cleanup_status status,
                                                      fmt::format_context& ctx) const -> decltype(ctx.out()) {
     return fmt::format_to(ctx.out(), "{}", service::cleanup_status_to_name_map[status]);
+}
+
+auto fmt::formatter<service::topology::upgrade_state>::format(service::topology::upgrade_state state,
+                                                     fmt::format_context& ctx) const -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "{}", service::upgrade_state_to_name_map[state]);
 }
