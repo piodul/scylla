@@ -120,6 +120,15 @@ struct topology {
 
     std::optional<transition_state> tstate;
 
+    enum class upgrade_state: uint16_t {
+        not_upgraded,
+        build_coordinator_state,
+        final_global_barrier,
+        done,
+    };
+
+    upgrade_state ustate = upgrade_state::not_upgraded;
+
     using version_t = int64_t;
     static constexpr version_t initial_version = 1;
     version_t version = initial_version;
@@ -263,6 +272,7 @@ std::ostream& operator<<(std::ostream&, const global_topology_request&);
 global_topology_request global_topology_request_from_string(const sstring&);
 std::ostream& operator<<(std::ostream& os, const raft_topology_cmd::command& cmd);
 cleanup_status cleanup_status_from_string(const sstring& s);
+topology::upgrade_state upgrade_state_from_string(const sstring&);
 }
 
 template <> struct fmt::formatter<service::cleanup_status> {
@@ -270,3 +280,7 @@ template <> struct fmt::formatter<service::cleanup_status> {
     auto format(service::cleanup_status status, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
 
+template <> struct fmt::formatter<service::topology::upgrade_state> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    auto format(service::topology::upgrade_state status, fmt::format_context& ctx) const -> decltype(ctx.out());
+};
