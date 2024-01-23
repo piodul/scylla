@@ -2009,6 +2009,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
     // Returns true if the state machine was transitioned into tablet migration path.
     future<bool> maybe_start_tablet_migration(group0_guard);
 
+    // Precondition: the state machine upgrade state is not at upgrade_state::done.
+    future<> do_upgrade_step(group0_guard);
+    future<> build_coordinator_state(group0_guard);
+
     future<> await_event() {
         _as.check();
         co_await _topo_sm.event.when();
@@ -2065,6 +2069,131 @@ future<bool> topology_coordinator::maybe_start_tablet_migration(group0_guard gua
 
     co_await update_topology_state(std::move(guard), std::move(updates), "Starting tablet migration");
     co_return true;
+}
+
+future<> topology_coordinator::do_upgrade_step(group0_guard guard) {
+    switch (_topo_sm._topology.ustate) {
+    case topology::upgrade_state::not_upgraded:
+        on_internal_error(rtlogger, std::make_exception_ptr(std::runtime_error(
+                "topology_coordinator was started even though upgrade to raft topology was not requested yet")));
+
+    case topology::upgrade_state::build_coordinator_state:
+        co_await build_coordinator_state(std::move(guard));
+        co_return;
+
+    case topology::upgrade_state::done:
+        on_internal_error(rtlogger, std::make_exception_ptr(std::runtime_error(
+                "topology_coordinator::do_upgrade_step called after upgrade was completed")));
+    }
+}
+
+future<> topology_coordinator::build_coordinator_state(group0_guard guard) {
+    // Wait until all nodes reach use_post_raft_procedures
+    rtlogger.info("waiting for all nodes to finish upgrade to raft schema");
+    release_guard(std::move(guard));
+    co_await _group0.wait_for_all_nodes_to_finish_upgrade(_as);
+    guard = co_await start_operation();
+
+    rtlogger.info("building initial raft topology state and CDC generation");
+
+    // Create a new CDC generation
+    auto tmptr = get_token_metadata_ptr();
+    auto get_sharding_info_for_host_id = [&] (locator::host_id host_id) -> std::pair<size_t, uint8_t> {
+        const auto ep = tmptr->get_endpoint_for_host_id_if_known(host_id);
+        if (!ep) {
+            throw std::runtime_error(format("IP of node with ID {} is not known", host_id));
+        }
+        const auto eptr = _gossiper.get_endpoint_state_ptr(*ep);
+        if (!eptr) {
+            throw std::runtime_error(format("no gossiper endpoint state for node {}/{}", host_id, *ep));
+        }
+        const auto& epmap = eptr->get_application_state_map();
+        const auto shard_count = std::stoi(epmap.at(gms::application_state::SHARD_COUNT).value());
+        const auto ignore_msb = std::stoi(epmap.at(gms::application_state::IGNORE_MSB_BITS).value());
+        return std::make_pair<size_t, uint8_t>(shard_count, ignore_msb);
+    };
+    auto [cdc_gen_uuid, guard_, mutation] = co_await prepare_and_broadcast_cdc_generation_data(tmptr, std::move(guard), std::nullopt, get_sharding_info_for_host_id);
+    guard = std::move(guard_);
+
+    topology_mutation_builder builder(guard.write_timestamp());
+
+    std::set<sstring> enabled_features;
+
+    // Build per-node state
+    for (const auto& host_id: tmptr->get_all_endpoints()) {
+        const auto ep = tmptr->get_endpoint_for_host_id_if_known(host_id);
+        if (!ep) {
+            throw std::runtime_error(format("failed to build initial raft topology state from gossip for node with ID {}, as its IP is not known", host_id));
+        }
+        const auto eptr = _gossiper.get_endpoint_state_ptr(*ep);
+        if (!eptr) {
+            throw std::runtime_error(format("failed to build initial raft topology state from gossip for node {}/{} as gossip contains no data for it", host_id, *ep));
+        }
+
+        const auto& epmap = eptr->get_application_state_map();
+        auto get_application_state = [&] (gms::application_state app_state) -> sstring {
+            const auto it = epmap.find(app_state);
+            if (it == epmap.end()) {
+                throw std::runtime_error(format("failed to build initial raft topology state from gossip for node {}/{}: application state {} is missing in gossip", 
+                        host_id, *ep, app_state));
+            }
+            // it's versioned_value::value(), not std::optional::value() - it does not throw
+            return it->second.value();
+        };
+
+        const auto datacenter = get_application_state(gms::application_state::DC);
+        const auto rack = get_application_state(gms::application_state::RACK);
+        const auto tokens_v = tmptr->get_tokens(host_id);
+        const std::unordered_set<dht::token> tokens(tokens_v.begin(), tokens_v.end());
+        const auto release_version = get_application_state(gms::application_state::RELEASE_VERSION);
+        const auto num_tokens = tokens.size();
+        const auto shard_count = get_application_state(gms::application_state::SHARD_COUNT);
+        const auto ignore_msb = get_application_state(gms::application_state::IGNORE_MSB_BITS);
+        const auto supported_features_s = get_application_state(gms::application_state::SUPPORTED_FEATURES);
+        const auto supported_features = gms::feature_service::to_feature_set(supported_features_s);
+
+        if (enabled_features.empty()) {
+            enabled_features = supported_features;
+        } else {
+            std::erase_if(enabled_features, [&] (const sstring& f) { return !supported_features.contains(f); });
+        }
+
+        builder.with_node(raft::server_id(host_id.uuid()))
+                .set("datacenter", datacenter)
+                .set("rack", rack)
+                .set("tokens", tokens)
+                .set("node_state", node_state::normal)
+                .set("release_version", release_version)
+                .set("num_tokens", (uint32_t)num_tokens)
+                .set("shard_count", (uint32_t)std::stoi(shard_count))
+                .set("ignore_msb", (uint32_t)std::stoi(ignore_msb))
+                .set("cleanup_status", cleanup_status::clean)
+                .set("request_id", utils::UUID())
+                .set("supported_features", supported_features);
+        
+        rtlogger.debug("node {} will contain the following parameters: "
+                "datacenter={}, rack={}, tokens={}, shard_count={}, ignore_msb={}, supported_features={}",
+                host_id, datacenter, rack, tokens, shard_count, ignore_msb, supported_features);
+    }
+
+    // Build the static columns
+    const bool add_ts_delay = true; // This is not the first generation, so add delay
+    auto cdc_gen_ts = cdc::new_generation_timestamp(add_ts_delay, _ring_delay);
+
+    const cdc::generation_id_v2 cdc_gen_id {
+        .ts = cdc_gen_ts,
+        .id = cdc_gen_uuid,
+    };
+
+    builder.set_version(topology::initial_version)
+            .set_fence_version(topology::initial_version)
+            .set_current_cdc_generation_id(cdc_gen_id)
+            .add_enabled_features(std::move(enabled_features));
+
+    // Commit
+    builder.set_upgrade_state(topology::upgrade_state::done);
+    auto reason = "upgrade: build the initial state";
+    co_await update_topology_state(std::move(guard), {std::move(mutation), builder.build()}, reason);
 }
 
 future<> topology_coordinator::fence_previous_coordinator() {
@@ -2188,7 +2317,13 @@ future<> topology_coordinator::run() {
                 continue;
             }
 
+            if (_topo_sm._topology.ustate != topology::upgrade_state::done) {
+                co_await do_upgrade_step(std::move(guard));
+                continue;
+            }
+
             bool had_work = co_await handle_topology_transition(std::move(guard));
+
             if (!had_work) {
                 // Nothing to work on. Wait for topology change event.
                 rtlogger.debug("topology coordinator fiber has nothing to do. Sleeping.");
