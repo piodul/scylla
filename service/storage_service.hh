@@ -750,7 +750,14 @@ private:
         // The node uses raft-based topology operations
         raft
     };
+    // The _topology_change_kind_enabled variable is first initialized in `join_cluster`.
+    // After the node successfully joins, the control over the variable is yielded
+    // to `topology_state_load`, so that it can control it during the upgrade from gossiper
+    // based topology to raft-based topology.
+    bool _manage_topology_change_kind_from_group0 = false;
     topology_change_kind _topology_change_kind_enabled = topology_change_kind::unknown;
+
+    void sync_topology_change_kind_with_group0();
 
 public:
     bool raft_topology_change_enabled() const {

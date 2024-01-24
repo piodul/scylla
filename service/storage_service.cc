@@ -547,6 +547,13 @@ future<> storage_service::topology_state_load() {
     // read topology state from disk and recreate token_metadata from it
     _topology_state_machine._topology = co_await _sys_ks.local().load_topology_state();
 
+    if (_manage_topology_change_kind_from_group0) {
+        sync_topology_change_kind_with_group0();
+    }
+    if (_topology_state_machine._topology.ustate != topology::upgrade_state::done) {
+        co_return;
+    }
+
     co_await _feature_service.container().invoke_on_all([&] (gms::feature_service& fs) {
         return fs.enable(boost::copy_range<std::set<std::string_view>>(_topology_state_machine._topology.enabled_features));
     });
@@ -1488,6 +1495,11 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
             throw std::runtime_error(fmt::format("{} failed. See earlier errors ({})", raft_replace_info ? "Replace" : "Bootstrap", err));
         }
 
+        // If we were the first node in the cluster, at this point `upgrade_state` will be
+        // initialized properly. Yield control to group 0
+        _manage_topology_change_kind_from_group0 = true;
+        sync_topology_change_kind_with_group0();
+
         co_await update_topology_with_local_metadata(*raft_server);
 
         // Node state is enough to know that bootstrap has completed, but to make legacy code happy
@@ -1504,6 +1516,9 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), _raft_experimental_topology);
         co_return;
     }
+
+    _manage_topology_change_kind_from_group0 = true;
+    sync_topology_change_kind_with_group0();
 
     // We bootstrap if we haven't successfully bootstrapped before, as long as we are not a seed.
     // If we are a seed, or if the user manually sets auto_bootstrap to false,
@@ -2586,6 +2601,8 @@ future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>&
         }
     } else {
         // We are a part of group 0. The _topology_change_kind_enabled flag is maintained from there.
+        _manage_topology_change_kind_from_group0 = true;
+        sync_topology_change_kind_with_group0();
         slogger.info("The node is already in group 0 and will restart in {} mode", raft_topology_change_enabled() ? "raft" : "legacy");
     }
     co_return co_await join_token_ring(sys_dist_ks, proxy, gossiper, std::move(initial_contact_nodes),
@@ -6057,6 +6074,22 @@ future<> storage_service::wait_for_normal_state_handled_on_boot() {
 
     slogger.info("Finished waiting for normal state handlers; endpoints observed in gossip: {}",
                  fmt_nodes_with_statuses(eps));
+}
+
+void storage_service::sync_topology_change_kind_with_group0() {
+    switch (_topology_state_machine._topology.ustate) {
+    case topology::upgrade_state::done:
+        _topology_change_kind_enabled = topology_change_kind::raft;
+        break;
+    case topology::upgrade_state::not_upgraded:
+        // Did not start upgrading to raft topology yet - use legacy
+        _topology_change_kind_enabled = topology_change_kind::legacy;
+        break;
+    default:
+        // Upgrade is in progress - disallow topology operations
+        _topology_change_kind_enabled = topology_change_kind::upgrading_to_raft;
+        break;
+    }
 }
 
 future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {
