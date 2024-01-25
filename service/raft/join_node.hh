@@ -14,6 +14,14 @@
 
 namespace service {
 
+struct join_node_query_params {};
+
+struct join_node_query_result {
+    // If true, the node should use raft topology.
+    // Otherwise, it should fall back to legacy node operations.
+    bool use_raft_topology;
+};
+
 struct join_node_request_params {
     raft::server_id host_id;
     std::optional<raft::server_id> replaced_id;
