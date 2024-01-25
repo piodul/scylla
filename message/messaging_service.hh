@@ -192,7 +192,8 @@ enum class messaging_verb : int32_t {
     JOIN_NODE_RESPONSE = 69,
     TABLET_STREAM_FILES = 70,
     STREAM_BLOB = 71,
-    LAST = 72,
+    JOIN_NODE_QUERY = 72,
+    LAST = 73,
 };
 
 } // namespace netw
