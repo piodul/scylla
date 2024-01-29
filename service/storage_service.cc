@@ -1453,8 +1453,9 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     }
     
     // TODO: Look at the group 0 upgrade state and use it to decide whether to attach or not
+    shared_ptr<i_endpoint_state_change_subscriber> gossip_feature_enabler;
     if (!raft_topology_change_enabled()) {
-        co_await _feature_service.enable_features_on_join(_gossiper, _sys_ks.local());
+        gossip_feature_enabler = co_await _feature_service.enable_features_on_join(_gossiper, _sys_ks.local());
     }
 
     set_mode(mode::JOINING);
@@ -1675,8 +1676,10 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
 
     if (_raft_experimental_topology) {
         // Waited on during stop()
-        (void)with_gate(_async_gate, [this, &sys_dist_ks] {
-            return track_upgrade_progress_to_topology_coordinator(sys_dist_ks);
+        (void)with_gate(_async_gate, [this, &sys_dist_ks, &gossip_feature_enabler] {
+            return track_upgrade_progress_to_topology_coordinator(sys_dist_ks).then([this, gossip_feature_enabler] {
+                return gossip_feature_enabler ? _gossiper.unregister_(gossip_feature_enabler) : make_ready_future<>();
+            });
         }).handle_exception_type([] (const abort_requested_exception&) {});
     }
 }

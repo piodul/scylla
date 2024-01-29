@@ -239,10 +239,11 @@ public:
     future<> enable_features();
 };
 
-future<> feature_service::enable_features_on_join(gossiper& g, db::system_keyspace& sys_ks) {
+future<shared_ptr<i_endpoint_state_change_subscriber>> feature_service::enable_features_on_join(gossiper& g, db::system_keyspace& sys_ks) {
     auto enabler = make_shared<persistent_feature_enabler>(g, *this, sys_ks);
     g.register_(enabler);
-    return enabler->enable_features();
+    co_await enabler->enable_features();
+    co_return enabler;
 }
 
 future<> feature_service::on_system_tables_loaded(db::system_keyspace& sys_ks) {
