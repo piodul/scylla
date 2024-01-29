@@ -43,10 +43,18 @@
 #include "db/config.hh"
 #include "replica/database.hh"
 #include "service/raft/group0_state_machine_merger.hh"
+#include "gms/feature_service.hh"
 
 namespace service {
 
 static logging::logger slogger("group0_raft_sm");
+
+group0_state_machine::group0_state_machine(raft_group0_client& client, migration_manager& mm, storage_proxy& sp, storage_service& ss, raft_address_map& address_map, gms::feature_service& feat, bool topology_change_enabled)
+        : _client(client), _mm(mm), _sp(sp), _ss(ss), _address_map(address_map), _topology_change_enabled(topology_change_enabled)
+        , _topology_on_raft_support_listener(feat.supports_consistent_topology_changes.when_enabled([this] () noexcept {
+            _topology_change_enabled = true;
+        })) {
+}
 
 static mutation extract_history_mutation(std::vector<canonical_mutation>& muts, const data_dictionary::database db) {
     auto s = db.find_schema(db::system_keyspace::NAME, db::system_keyspace::GROUP0_HISTORY);
