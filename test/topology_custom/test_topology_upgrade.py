@@ -74,12 +74,14 @@ async def test_topology_upgrade_basic(request, manager: ManagerClient):
     cfg = {'enable_user_defined_functions': False,
            'experimental_features': ['consistent-topology-changes'],
            'error_injections_at_startup': ['force_gossip_based_join']}
-    servers = [await manager.server_add(config=cfg) for _ in range(3)]
-    cql = manager.cql
-    assert(cql)
-
+    
+    servers = [await manager.server_add(config=cfg)]
     # Disable injections for the subsequent nodes
     del cfg['error_injections_at_startup']
+
+    servers += [await manager.server_add(config=cfg) for _ in range(2)]
+    cql = manager.cql
+    assert(cql)
 
     logging.info("Waiting until driver connects to every server")
     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
@@ -152,6 +154,9 @@ async def test_topology_recovery_basic(request, manager: ManagerClient):
     hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
     logging.info(f"Driver reconnected, hosts: {hosts}")
 
+    logging.info("Waiting until all nodes see others as alive")
+    await asyncio.gather(*(manager.server_sees_others(srv.server_id, len(servers) - 1, time.time() + 60) for srv in servers))
+
     logging.info(f"Deleting Raft data and upgrade state on {hosts}")
     await asyncio.gather(*(delete_raft_topology_state(cql, h) for h in hosts))
     await asyncio.gather(*(delete_raft_data_and_upgrade_state(cql, h) for h in hosts))
@@ -185,7 +190,69 @@ async def test_topology_recovery_basic(request, manager: ManagerClient):
     await asyncio.gather(*(check_system_topology_and_cdc_generations_v3_consistency(manager, h) for h in hosts))
 
     logging.info("Booting new node")
-    await manager.server_add(config=cfg)
+    servers += [await manager.server_add(config=cfg)]
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+
+    logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
+    await asyncio.gather(*(check_system_topology_and_cdc_generations_v3_consistency(manager, h) for h in hosts))
+
+
+@pytest.mark.asyncio
+@log_run_time
+async def test_topology_recovery_after_majority_loss(request, manager: ManagerClient):
+    cfg = {'enable_user_defined_functions': False,
+           'experimental_features': ['consistent-topology-changes']}
+    servers = [await manager.server_add(config=cfg) for _ in range(3)]
+    cql = manager.cql
+    assert(cql)
+
+    logging.info("Waiting until driver connects to every server")
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+
+    srv1, *others = servers
+
+    logging.info(f"Killing all nodes except {srv1}")
+    await asyncio.gather(*(manager.server_stop_gracefully(srv.server_id) for srv in others))
+
+    logging.info(f"Entering recovery state on {srv1}")
+    host1 = next(h for h in hosts if h.address == srv1.ip_addr)
+    await enter_recovery_state(cql, host1)
+    await restart(manager, srv1)
+    cql = await reconnect_driver(manager)
+
+    logging.info("Node restarted, waiting until driver connects")
+    host1 = (await wait_for_cql_and_get_hosts(cql, [srv1], time.time() + 60))[0]
+
+    for i in range(len(others)):
+        to_remove = others[i]
+        ignore_dead_ips = [srv.ip_addr for srv in others[i+1:]]
+        logging.info(f"Removing {to_remove} using {srv1} with ignore_dead: {ignore_dead_ips}")
+        await manager.remove_node(srv1.server_id, to_remove.server_id, ignore_dead_ips)
+
+    logging.info(f"Deleting old Raft data and upgrade state on {host1} and restarting")
+    await delete_raft_topology_state(cql, host1)
+    await delete_raft_data_and_upgrade_state(cql, host1)
+    await restart(manager, srv1)
+    cql = await reconnect_driver(manager)
+
+    logging.info("Node restarted, waiting until driver connects")
+    host1 = (await wait_for_cql_and_get_hosts(cql, [srv1], time.time() + 60))[0]
+
+    logging.info(f"Driver reconnected, host: {host1}. Waiting until upgrade to raft schema finishes.")
+    await wait_until_schema_upgrade_finishes(cql, host1, time.time() + 60)
+
+    logging.info("Triggering upgrade to raft topology")
+    await manager.api.upgrade_to_raft_topology(host1.address)
+
+    logging.info(f"Waiting until upgrade to raft topology finishes.")
+    await wait_until_topology_upgrade_finishes(manager, host1.address, time.time() + 60)
+
+    logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
+    await check_system_topology_and_cdc_generations_v3_consistency(manager, host1)
+
+    logging.info(f"Add two more nodes")
+    servers = [srv1] + await manager.servers_add(2, config=cfg)
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
     logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
     await asyncio.gather(*(check_system_topology_and_cdc_generations_v3_consistency(manager, h) for h in hosts))
