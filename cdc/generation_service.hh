@@ -41,6 +41,7 @@ public:
         unsigned ignore_msb_bits;
         std::chrono::milliseconds ring_delay;
         bool dont_rewrite_streams = false;
+        bool raft_experimental_topology = false;
     };
 
 private:
@@ -193,6 +194,9 @@ private:
      * we need to check if the instance is still there. Storing the shared pointer will keep it alive.
      */
     shared_ptr<db::system_distributed_keyspace> get_sys_dist_ks();
+
+    /* Serves the same role as get_sys_dist_ks, but for db::system_keyspace. */
+    shared_ptr<db::system_keyspace> get_sys_ks();
 
     /* Part of the upgrade procedure. Useful in case where the version of Scylla that we're upgrading from
      * used the "cdc_streams_descriptions" table. This procedure ensures that the new "cdc_streams_descriptions_v2"
