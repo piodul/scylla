@@ -126,7 +126,8 @@ void cache_hitrate_calculator::run_on(size_t master, lowres_clock::duration d) {
     if (!_stopped) {
         // Do it in the background.
         (void)container().invoke_on(master, [d] (cache_hitrate_calculator& local) {
-            local._timer.arm(d);
+            (void)d;
+            local._timer.arm(std::chrono::seconds(0));
         }).handle_exception_type([] (seastar::no_sharded_instance_exception&) { /* ignore */ });
     }
 }
@@ -191,9 +192,10 @@ future<lowres_clock::duration> cache_hitrate_calculator::recalculate_hitrates() 
         // read_mutation_data and read_digest RPC verbs which have
         // cache_temperature in the response. So there is no need to update
         // CACHE_HITRATES through gossip in high frequency.
-        bool do_publish = (_published_nr == 0) ||
-                          (_diff > 0.1) ||
-                          ( _diff > 0.01 && (now - _published_time) > 5000ms);
+        bool do_publish = true;
+        // bool do_publish = (_published_nr == 0) ||
+        //                   (_diff > 0.1) ||
+        //                   ( _diff > 0.01 && (now - _published_time) > 5000ms);
 
         // We do the recalculation faster if the diff is bigger than 0.01. It
         // is useful to do the calculation even if we do not publish the
