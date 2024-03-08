@@ -5,6 +5,8 @@ cluster:
 extra_scylla_config_options:
     authenticator: AllowAllAuthenticator
     authorizer: AllowAllAuthorizer
+extra_scylla_cmdline_options:
+  - "--logger-log-level=gossip=trace"
 run_first:
   - test_raft_recovery_majority_loss
   - test_raft_recovery_stuck
