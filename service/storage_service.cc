@@ -1895,6 +1895,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
             try {
                 co_await me.track_upgrade_progress_to_topology_coordinator(sys_dist_ks, proxy);
             } catch (const abort_requested_exception&) {
+                slogger.warn("Upgrade fiber terminated due to aborted exception");
                 // Ignore
             }
             // Other errors are handled internally by track_upgrade_progress_to_topology_coordinator
@@ -1908,9 +1909,11 @@ future<> storage_service::track_upgrade_progress_to_topology_coordinator(sharded
     while (true) {
         _group0_as.check();
         try {
+            slogger.warn("raft topology progress fiber: wait until group0 upgraded");
             co_await _group0->client().wait_until_group0_upgraded(_group0_as);
 
             // First, wait for the feature to become enabled
+            slogger.warn("raft topology progress fiber: wait until feature is enabled");
             shared_promise<> p;
             _feature_service.supports_consistent_topology_changes.when_enabled([&] () noexcept { p.set_value(); });
             co_await p.get_shared_future(_group0_as);
