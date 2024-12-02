@@ -118,6 +118,10 @@ using get_children_request = task_id;
 using get_children_response = std::vector<task_id>;
 }
 
+namespace qos {
+    class service_level_controller;
+}
+
 namespace netw {
 
 /* All verb handler identifiers */
@@ -350,6 +354,8 @@ private:
     std::vector<scheduling_info_for_connection_index> _scheduling_info_for_connection_index;
     std::vector<tenant_connection_index> _connection_index_for_tenant;
     gms::feature_service& _feature_service;
+    std::unordered_map<sstring, size_t> _dynamic_tenants_to_client_idx;
+    qos::service_level_controller& _sl_controller;
 
     struct connection_ref;
     std::unordered_multimap<locator::host_id, connection_ref> _host_connections;
@@ -365,8 +371,8 @@ private:
 public:
     using clock_type = lowres_clock;
 
-    messaging_service(locator::host_id id, gms::inet_address ip, uint16_t port, gms::feature_service& feature_service, gms::gossip_address_map& address_map);
-    messaging_service(config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>, gms::feature_service& feature_service, gms::gossip_address_map& address_map);
+    messaging_service(qos::service_level_controller& sl_controller, locator::host_id id, gms::inet_address ip, uint16_t port, gms::feature_service& feature_service, gms::gossip_address_map& address_map);
+    messaging_service(qos::service_level_controller& sl_controller, config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>, gms::feature_service& feature_service, gms::gossip_address_map& address_map);
     ~messaging_service();
 
     future<> start();
@@ -462,10 +468,11 @@ public:
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
     scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
-    scheduling_group scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
+    future<scheduling_group> scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
     std::vector<messaging_service::scheduling_info_for_connection_index> initial_scheduling_info() const;
-    unsigned get_rpc_client_idx(messaging_verb verb) const;
+    unsigned get_rpc_client_idx(messaging_verb verb);
     static constexpr std::array<std::string_view, 3> _connection_types_prefix = {"statement:", "statement-ack:", "forward:"}; // "forward" is the old name for "mapreduce"
+    unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
 
     void init_feature_listeners();
 private:

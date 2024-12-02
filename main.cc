@@ -1482,7 +1482,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             netw::messaging_service::scheduling_config scfg;
             scfg.statement_tenants = {
-                    {dbcfg.statement_scheduling_group, "$user"},
                     {default_scheduling_group(), "$system"},
                     {dbcfg.streaming_scheduling_group, "$maintenance", false}
             };
@@ -1501,7 +1500,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
 
             // Delay listening messaging_service until gossip message handlers are registered
-            messaging.start(mscfg, scfg, creds, std::ref(feature_service), std::ref(gossip_address_map)).get();
+            messaging.start(std::ref(sl_controller), mscfg, scfg, creds, std::ref(feature_service), std::ref(gossip_address_map)).get();
             auto stop_ms = defer_verbose_shutdown("messaging service", [&messaging] {
                 messaging.invoke_on_all(&netw::messaging_service::stop).get();
             });
