@@ -108,6 +108,8 @@
 #include "service/topology_mutation.hh"
 #include "service/topology_coordinator.hh"
 #include "cql3/query_processor.hh"
+#include "service/qos/service_level_controller.hh"
+#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include <csignal>
 
 #include <boost/algorithm/string/split.hpp>
@@ -2033,6 +2035,49 @@ future<> storage_service::join_topology(sharded<db::system_distributed_keyspace>
         // Don't try rewriting CDC stream description tables.
         // See cdc.md design notes, `Streams description table V1 and rewriting` section, for explanation.
         co_await _sys_ks.local().cdc_set_rewritten(std::nullopt);
+    }
+
+    // now, that the system distributed keyspace is initialized and started,
+    // pass an accessor to the service level controller so it can interact with it
+    // but only if the conditions are right (the cluster supports or have supported
+    // workload prioritization before):
+    if (!sys_dist_ks.local().workload_prioritization_tables_exists()) {
+        // if we got here, it means that the workload priotization didn't exist before and
+        // also that the cluster currently doesn't support workload prioritization.
+        // we delay the creation of the tables and accessing them until it does.
+        //
+        // the callback might be run immediately and it uses async methods, so the thread is needed
+        co_await seastar::async([&] {
+            _workload_prioritization_registration = _feature_service.workload_prioritization.when_enabled([&sys_dist_ks] () {
+                // The code below runs after the workload prioritization feature is enabled, so there
+                // is a chance - right after all nodes start supporting the cluster feature - that
+                // it will run on all nodes roughly at the same time. The code inside
+                // start_workload_prioritization checks the current schema of the service levels
+                // table and creates or updates it if needed.
+                //
+                // Before schema on raft, clusters couldn't handle conflicting schema changes
+                // initiated from different nodes too well. In order to reduce the chance of this
+                // happening, the code below sleeps for a bit before running start_workload_prioritization.
+                //
+                // With schema on raft, these kinds of conflicts are handled gracefully
+                // (only one node will win) so the sleep is not strictly necessary. However, it doesn't
+                // hurt to keep it, and it might even have a positive effect of reducing contention
+                // as more nodes will see that the service levels table is already updated and will
+                // not attempt a group0 operation.
+                //
+                // Finally, it should be noted that the code below only concerns the legacy workload
+                // prioritization table, so it could be removed / simplified when upgrades from non-raft
+                // service levels stop being supported.
+                std::random_device seed_gen;
+                std::default_random_engine rnd_engine(seed_gen());
+                std::uniform_int_distribution<> delay_generator(0,5000000);
+                sleep(std::chrono::microseconds(delay_generator(rnd_engine))).get();
+                sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start_workload_prioritization).get();
+                slogger.info("Workload prioritization v1 started.");
+            });
+        });
+    } else {
+        slogger.info("Workload prioritization v1 is already started.");
     }
 
     if (!cdc_gen_id) {
