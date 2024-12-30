@@ -19,13 +19,14 @@ The groups currently defined are:
 | memtable_to_cache                            | 1000
 | compaction                                   | 1000
 | memory_compaction                            | 1000
-| statement                                    | 1000
 | gossip                                       | 1000
 | streaming (a.k.a maintenance)                | 200
 
 TODO: explain the purpose each of each of these scheduling groups, and what they are used for. E.g., "streaming" is also called maintenance and used also used for repair. memtable is used for memtable flushes (?). default is used for gossip, etc.
 
 The "Default shares" is the initial number of shares given to each scheduling group. They can be later modified by controllers, which aim to discover when a certain component needs to run faster because it is not keeping up - or run slower because it is finishing more quickly than it needs and causing performance to fluctuate. See the "Controllers" section below.
+
+In addition to the scheduling groups listed above, Scylla also reserves a pool of scheduling groups for use in [service levels](service-levels.md). Each service level gets its own dedicated scheduling group named `sl:<service level name>`. If a user has a service level attachted to them, the service level's scheduling group will be used to run the operations issued by that user. Up to 7 service levels can be created in one cluster, and there is also the "default" service level which is created by Scylla and cannot be changed.
 
 ## Additional notes
 
@@ -37,6 +38,10 @@ To mitigate this, we should switch to nested groups, where two nested groups in 
 TODO: list the controllers we have, and which shares each one changes, and how.
 
 See also: [compaction_controller.md]
+
+### Service levels
+
+As mentioned in the [Scheduling groups](#scheduling-groups-cpu-scheduler) section, each service level is associated with its own scheduling group. The number of shares of those scheduling groups directly correspond to the number of shares of their service level. The number of shares is a property of a service level which can be changed by users, and when that happens the service level controller updates the number of shares of the corresponding scheduling group.
 
 ## Per user performance isolation
 TODO
