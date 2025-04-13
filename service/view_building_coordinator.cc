@@ -36,6 +36,7 @@
 #include "service/raft/raft_group0_client.hh"
 #include "service/topology_coordinator.hh"
 #include "utils/assert.hh"
+#include "utils/error_injection.hh"
 #include "utils/log.hh"
 #include "service/migration_manager.hh"
 #include "replica/database.hh"
@@ -135,6 +136,8 @@ future<> view_building_coordinator::run() {
     });
 
     while (!_as.abort_requested()) {
+        co_await utils::get_local_injector().inject("view_building_coordinator_pause_main_loop", utils::wait_for_message(std::chrono::minutes(2)));
+
         bool sleep = false;
         vbc_logger.debug("coordinator loop iteration");
         try {

@@ -3802,6 +3802,25 @@ future<std::vector<table_id>> view_building_worker::do_build_operation(table_id 
         throw std::runtime_error(fmt::format("Base table id ({}) doesn't match id of currenty processing base table ({})", base_id, _base_id));
     }
     _as.check();
+
+    co_await utils::get_local_injector().inject("view_building_worker_pause_build_range_task", [&] (auto& handler) -> future<> {
+        bool should_wait = false;
+        auto maybe_raw_token = handler.template get<int64_t>("token");
+        if (maybe_raw_token) {
+            // Wait only if this range contains given token
+            should_wait = range.contains(dht::token(*maybe_raw_token), std::compare_three_way{});
+        } else {
+            // The range is not specified, so wait unconditionally.
+            should_wait = true;
+        }
+
+        if (should_wait) {
+            vlogger.info("view_build_worker: paused, waiting for message");
+            co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::minutes(1));
+        }
+
+        co_return;
+    });
     
     auto views_set = views | std::ranges::to<std::set>();
 
