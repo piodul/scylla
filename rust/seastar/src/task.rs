@@ -34,6 +34,22 @@ pub fn spawn_for_cpp<T>(future: impl Future<Output = T> + 'static) -> BoxFuture<
 where
     T: BoxPromiseTarget + BoxFutureTarget + 'static,
 {
+    // SAFETY: We require the lifetime of the future and its output to be 'static.
+    unsafe { spawn_for_cpp_with_any_lifetime(future) }
+}
+
+/// A potentially dangerous version of `spawn_for_cpp` which ignores the lifetime of the future and its result.
+///
+/// It is the responsibility of the caller to ensure that the spawned future does not outlive
+/// the type of the future or its return type.
+///
+/// TODO: Some concrete examples.
+///
+/// This function is meant to be used in `seastar::taskify`.
+pub unsafe fn spawn_for_cpp_with_any_lifetime<T>(future: impl Future<Output = T>) -> BoxFuture<T>
+where
+    T: BoxPromiseTarget + BoxFutureTarget,
+{
     let promise = BoxPromise::new();
     let sfut = promise.get_future();
     let completer = move |res| match res {
@@ -61,7 +77,10 @@ where
             eprintln!("exceptional future ignored!");
         }
     };
-    spawn_with_completer(future, completer);
+    // SAFETY: We require the lifetime of the future and its output to be 'static.
+    unsafe {
+        spawn_with_completer(future, completer);
+    }
     async move {
         match receiver.await.unwrap() {
             Ok(v) => v,
@@ -155,8 +174,10 @@ where
         value_cell.set(Some(res));
         prom.set_value(());
     };
-
-    spawn_with_completer(future, completer);
+    // SAFETY: We require the lifetime of the future and its output to be 'static.
+    unsafe {
+        spawn_with_completer(future, completer);
+    }
 
     BoxFuture::into_raw(sfut)
 }
@@ -194,9 +215,9 @@ type FuturePollFn = extern "C" fn(task: *mut c_void, fut: *mut c_void) -> c_int;
 /// The task is not being waited on, it is the responsibility of the future
 /// being polled to synchronize with waiters.
 /// TODO: Adjust the comment
-fn spawn_with_completer<Fut, T, Completer>(future: Fut, completer: Completer)
+unsafe fn spawn_with_completer<Fut, T, Completer>(future: Fut, completer: Completer)
 where
-    Fut: Future<Output = T> + 'static,
+    Fut: Future<Output = T>,
     Completer: FnOnce(Result<T, Box<dyn Any + Send + 'static>>),
 {
     extern "C" {

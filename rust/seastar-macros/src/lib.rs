@@ -100,10 +100,15 @@ pub fn taskify(attr: TokenStream1, item: TokenStream1) -> TokenStream1 {
         }
     };
 
+    // The function becomes unsafe to call because the returned future
+    // might capture some references, and they need to be kept alive
+    // until the task finishes executing.
+    sig.unsafety = Some(syn::Token![unsafe](sig.ident.span()));
+
     quote::quote! {
         #(#attrs)*
         #vis #sig {
-            #crate_path::task::spawn_for_cpp(async move #block)
+            #crate_path::task::spawn_for_cpp_with_any_lifetime(async move #block)
         }
     }
     .into_token_stream()

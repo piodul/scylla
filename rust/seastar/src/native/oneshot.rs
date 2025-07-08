@@ -104,9 +104,7 @@ impl<T> OneshotCell<T> {
                 Poll::Pending
             }
             Shared::PendingWaited(old_waker) => {
-                if !old_waker.will_wake(cx.waker()) {
-                    *old_waker = cx.waker().clone();
-                }
+                old_waker.clone_from(cx.waker());
                 Poll::Pending
             }
             Shared::Ready(_) => match std::mem::replace(shared, Shared::Closed) {

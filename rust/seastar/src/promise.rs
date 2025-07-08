@@ -38,6 +38,7 @@ where
     T: BoxPromiseTarget,
 {
     /// Creates a new empty promise.
+    #[inline]
     pub fn new() -> Self {
         Self {
             cpp_prom: unsafe { <T as BoxPromiseTarget>::new() },
@@ -47,6 +48,7 @@ where
 
     /// Sets the value of the promise.
     /// Aborts if the promise was already set.
+    #[inline]
     pub fn set_value(&self, val: T) {
         let mut val_holder = MaybeUninit::new(val);
         unsafe {
@@ -59,6 +61,7 @@ where
 
     /// Sets the promise to given exception.
     /// Aborts if the promise was already set.
+    #[inline]
     pub fn set_exception(&self, eptr: CxxExceptionPtr) {
         let mut eptr_holder = MaybeUninit::new(eptr);
         unsafe {
@@ -71,6 +74,7 @@ where
 
     /// Creates a promise from given future.
     /// Aborts if a future was already created from this promise.
+    #[inline]
     pub fn get_future(&self) -> BoxFuture<T> {
         let cpp_fut = unsafe { <T as BoxPromiseTarget>::get_future(self.cpp_prom) };
         unsafe { BoxFuture::new_from_raw(cpp_fut) }
@@ -81,6 +85,7 @@ impl<T> Drop for BoxPromise<T>
 where
     T: BoxPromiseTarget,
 {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             <T as BoxPromiseTarget>::free(self.cpp_prom);

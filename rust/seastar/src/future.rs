@@ -59,6 +59,7 @@ where
 }
 
 /// Creates a new seastar future that is immediately ready.
+#[inline]
 pub fn make_ready_future<T>(val: T) -> BoxFuture<T>
 where
     T: BoxFutureTarget,
@@ -73,6 +74,7 @@ where
 }
 
 /// Creates a new seastar future that contains an exception.
+#[inline]
 pub fn make_exception_future<T>(eptr: CxxExceptionPtr) -> BoxFuture<T>
 where
     T: BoxFutureTarget,
@@ -113,6 +115,7 @@ impl<T> Drop for BoxFuture<T>
 where
     T: BoxFutureTarget,
 {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             <T as BoxFutureTarget>::free(self.cpp_fut);
@@ -129,6 +132,7 @@ impl<T> Drop for BoxFuturePoller<T>
 where
     T: BoxFutureTarget,
 {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             let new_count = (*self.0).poll.ref_count - 1;

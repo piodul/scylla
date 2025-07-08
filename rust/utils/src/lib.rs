@@ -6,6 +6,6 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-pub mod abort_source;
-pub mod condition_variable;
-pub mod oneshot;
+pub mod uuid;
+
+pub use uuid::Uuid;

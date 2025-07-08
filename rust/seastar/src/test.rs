@@ -53,11 +53,11 @@ mod ffi {
         fn instantiate_a_panic(message: &str) -> CxxExceptionPtr;
         fn consume_panic(eptr: CxxExceptionPtr) -> String;
 
-        fn test_exception_repackaging(f: BoxFutureBool) -> BoxFutureBool;
+        unsafe fn test_exception_repackaging(f: BoxFutureBool) -> BoxFutureBool;
 
-        fn test_submit_to() -> BoxFutureUnit;
+        unsafe fn test_submit_to() -> BoxFutureUnit;
 
-        fn test_abort_source(abs: UniquePtr<AbortSource>) -> BoxFutureUnit;
+        unsafe fn test_abort_source(abs: UniquePtr<AbortSource>) -> BoxFutureUnit;
     }
 
     impl UniquePtr<AbortSource> {}
@@ -91,11 +91,11 @@ fn test5(eptr: CxxExceptionPtr) -> &'static str {
     }
 
     // Must also match as CxxException
-    if eptr.try_catch::<&CxxException>().is_none() {
+    if eptr.try_catch::<CxxException>().is_none() {
         return "not-cxx-exception";
     }
 
-    if let Some(e) = eptr.try_catch::<&AbortRequestedException>() {
+    if let Some(e) = eptr.try_catch::<AbortRequestedException>() {
         if e.to_string() != "abort requested" {
             return "wrong message";
         }

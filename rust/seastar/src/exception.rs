@@ -20,6 +20,7 @@ pub trait ResultExt {
 impl<T> ResultExt for Result<T> {
     type T = T;
 
+    #[inline]
     fn eunwrap(self) -> Self::T {
         match self {
             Ok(t) => t,
@@ -32,7 +33,7 @@ impl<T> ResultExt for Result<T> {
 // We are only supporting libstd's implementation, so we can assume a lot of things, and verify some on the cpp side.
 #[repr(transparent)]
 pub struct CxxExceptionPtr {
-    data: [MaybeUninit<*const c_void>; 1],
+    data: MaybeUninit<*const c_void>,
 }
 
 // std::exception_ptr has std::shared_ptr-like semantics, so it's safe to move it between shards.
@@ -44,22 +45,25 @@ impl CxxExceptionPtr {
     pub const fn null() -> Self {
         // TODO: Should this be initialized by C++?
         Self {
-            data: [MaybeUninit::new(std::ptr::null_mut())],
+            data: MaybeUninit::new(std::ptr::null_mut()),
         }
     }
 
     #[inline]
     pub fn is_null(&self) -> bool {
         // TODO: Should this be manipulated from C++?
-        unsafe { self.data[0].assume_init().is_null() }
+        unsafe { self.data.assume_init().is_null() }
     }
 
     #[inline]
-    pub fn try_catch<E>(&self) -> Option<E>
+    pub fn try_catch<E>(&self) -> Option<&E>
     where
-        E: TryCatch,
+        E: CxxExceptionPtrTarget,
     {
-        E::catch(self)
+        unsafe {
+            let ptr = E::try_catch(self as *const CxxExceptionPtr as *const c_void);
+            (ptr as *const E).as_ref()
+        }
     }
 
     /// Triggers a panic.
@@ -137,6 +141,7 @@ impl CxxExceptionPtr {
 struct CxxPanicWrapper(CxxExceptionPtr);
 
 impl Clone for CxxExceptionPtr {
+    #[inline]
     fn clone(&self) -> Self {
         let mut eptr = MaybeUninit::<Self>::uninit();
         unsafe {
@@ -150,6 +155,7 @@ impl Clone for CxxExceptionPtr {
 }
 
 impl Drop for CxxExceptionPtr {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             seastar_rs_exception_ptr_drop(self as *mut _ as *mut c_void);
@@ -166,27 +172,6 @@ unsafe impl ::cxx::ExternType for CxxExceptionPtr {
 pub unsafe trait CxxExceptionPtrTarget {
     #[doc(hidden)]
     unsafe fn try_catch(ptr_to_eptr: *const c_void) -> *const c_void;
-}
-
-pub unsafe trait TryCatch: Sized {
-    fn catch<'ep>(eptr: &CxxExceptionPtr) -> Option<Self>
-    where
-        Self: 'ep;
-}
-
-unsafe impl<'e, E> TryCatch for &'e E
-where
-    E: CxxExceptionPtrTarget,
-{
-    fn catch<'ep>(eptr: &CxxExceptionPtr) -> Option<Self>
-    where
-        Self: 'ep,
-    {
-        unsafe {
-            let e_ptr = <E as CxxExceptionPtrTarget>::try_catch(eptr as *const _ as *const c_void);
-            (e_ptr as *const E).as_ref()
-        }
-    }
 }
 
 #[doc(hidden)]

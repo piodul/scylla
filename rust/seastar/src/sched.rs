@@ -48,6 +48,7 @@ pub async fn maybe_yield() {
     .await
 }
 
+/// Preempt the current task and reschedule it for execution later.
 pub async fn yield_now() {
     let mut awaited = false;
     poll_fn(|cx| {
